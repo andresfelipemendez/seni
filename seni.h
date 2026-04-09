@@ -38,6 +38,11 @@ typedef enum {
     PARSE_READ_STRUCT_NAME,
 } parse_state;
 
-ast parse_header(arena* a,char* header);
+typedef struct {
+    ast value;
+    char* err;  // NULL = success
+} parse_result;
+
+parse_result parse_header(arena* a, char* header);
 diff diff_structs(char* old_header, char* new_header);
 #endif
