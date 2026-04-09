@@ -174,6 +174,20 @@ UTEST(parse, missing_struct_name) {
     ASSERT_STREQ("struct missing name at line 3", r.err);
 }
 
+UTEST(parse, line_count_after_closing_brace) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header =
+    "typedef struct {\n"
+        "int x;\n"
+    "}\n"
+    ";";
+    parse_result r = parse_header(&a, header);
+    ASSERT_TRUE(r.err);
+    ASSERT_STREQ("struct missing name at line 4", r.err);
+}
+
 /*
 UTEST(foo, bar) {
     char buf[4096];

@@ -61,15 +61,20 @@ parse_result parse_header(arena* a, char* header) {
             continue;
         } else if (state == PARSE_IN_STRUCT && header[i] == '}') {
             i++;
-            while (header[i] != '\0' && is_white_space(header[i])) i++;
+            while (header[i] != '\0' && is_white_space(header[i])) {
+                if (header[i] == '\n') line++;
+                i++;
+            }
             int start = i;
             while (header[i] != ';' && header[i] != '\0') {
+                if (header[i] == '\n') line++;
                 i++;
             }
             int len = i - start;
             if (len == 0) {
-                char* msg = allocate(a, 48);
-                if (msg) sprintf(msg, "struct missing name at line %d", line);
+                int n = snprintf(NULL, 0, "struct missing name at line %d", line) + 1;
+                char* msg = allocate(a, n);
+                if (msg) snprintf(msg, n, "struct missing name at line %d", line);
                 r.err = msg ? msg : "struct missing name";
                 return r;
             }
@@ -97,8 +102,9 @@ parse_result parse_header(arena* a, char* header) {
                 int start = i;
                 while (header[i] != ' ' && header[i] != '\0') i++;
                 int len = i - start;
-                char* msg = allocate(a, 48 + len);
-                if (msg) sprintf(msg, "unknown type '%.*s' at line %d", len, &header[start], line);
+                int n = snprintf(NULL, 0, "unknown type '%.*s' at line %d", len, &header[start], line) + 1;
+                char* msg = allocate(a, n);
+                if (msg) snprintf(msg, n, "unknown type '%.*s' at line %d", len, &header[start], line);
                 r.err = msg ? msg : "unknown type";
                 return r;
             }
@@ -112,8 +118,9 @@ parse_result parse_header(arena* a, char* header) {
                 i++;
             }
             if (header[i] == '\0') {
-                char* msg = allocate(a, 48);
-                if (msg) sprintf(msg, "unexpected end of input at line %d", line);
+                int n = snprintf(NULL, 0, "unexpected end of input at line %d", line) + 1;
+                char* msg = allocate(a, n);
+                if (msg) snprintf(msg, n, "unexpected end of input at line %d", line);
                 r.err = msg ? msg : "unexpected end of input";
                 return r;
             }
