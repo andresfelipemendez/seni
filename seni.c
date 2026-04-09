@@ -1,6 +1,11 @@
 #include "seni.h"
 
 #include <string.h>
+#include <stdio.h>
+
+#define MAX_STRUCTS 64
+#define STR(x) #x
+#define XSTR(x) STR(x)
 
 static int is_white_space(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
@@ -8,13 +13,21 @@ static int is_white_space(char c) {
 
 parse_result parse_header(arena* a, char* header) {
     parse_result r = {0};
-    r.err = NULL;
 
-    parse_state state = PARSE_OUTSIDE;
+    // single pass: count structs and fields per struct
     size_t struct_count = 0;
+    size_t field_counts[MAX_STRUCTS] = {0};
+    int in_struct = 0;
     for (int i = 0; header[i] != '\0'; i++) {
         if (strncmp(&header[i], "typedef struct {", 16) == 0) {
             struct_count++;
+            if (struct_count > MAX_STRUCTS) { r.err = "more than " XSTR(MAX_STRUCTS) " structs, too many structs"; return r; }
+            in_struct = 1;
+            i += 15;
+        } else if (in_struct && (header[i] == ',' || header[i] == ';')) {
+            field_counts[struct_count - 1]++;
+        } else if (in_struct && header[i] == '}') {
+            in_struct = 0;
         }
     }
 
@@ -25,33 +38,21 @@ parse_result parse_header(arena* a, char* header) {
     r.value.structs = allocate(a, sizeof(ast_struct) * struct_count);
     if (!r.value.structs) { r.err = "out of memory"; return r; }
 
-    // count fields per struct
-    size_t* field_counts = allocate(a, sizeof(size_t) * struct_count);
-    if (!field_counts) { r.err = "out of memory"; return r; }
-    for (size_t s = 0; s < struct_count; s++) field_counts[s] = 0;
-    int in_struct = 0;
-    size_t si_count = 0;
-    for (int i = 0; header[i] != '\0'; i++) {
-        if (strncmp(&header[i], "typedef struct {", 16) == 0) {
-            in_struct = 1;
-        } else if (in_struct && (header[i] == ',' || header[i] == ';')) {
-            field_counts[si_count]++;
-        } else if (in_struct && header[i] == '}') {
-            si_count++;
-            in_struct = 0;
-        }
-    }
-
+    parse_state state = PARSE_OUTSIDE;
     size_t si = 0;
     size_t fi = 0;
     ast_type cur_type = ast_unknown;
 
+    int line = 1;
     for (int i = 0; header[i] != '\0'; i++) {
+        if (header[i] == '\n') line++;
         if (state == PARSE_OUTSIDE && strncmp(&header[i], "typedef struct {", 16) == 0) {
             state = PARSE_IN_STRUCT;
             fi = 0;
-            r.value.structs[si].fields = allocate(a, sizeof(ast_field) * field_counts[si]);
-            if (!r.value.structs[si].fields) { r.err = "out of memory"; return r; }
+            if (field_counts[si] > 0) {
+                r.value.structs[si].fields = allocate(a, sizeof(ast_field) * field_counts[si]);
+                if (!r.value.structs[si].fields) { r.err = "out of memory"; return r; }
+            }
             r.value.structs[si].fields_count = 0;
             i += 15;
             continue;
@@ -66,11 +67,18 @@ parse_result parse_header(arena* a, char* header) {
                 i++;
             }
             int len = i - start;
+            if (len == 0) {
+                char* msg = allocate(a, 48);
+                if (msg) sprintf(msg, "struct missing name at line %d", line);
+                r.err = msg ? msg : "struct missing name";
+                return r;
+            }
             r.value.structs[si].name = arena_copy_string(a, &header[start], len);
             if (!r.value.structs[si].name) { r.err = "out of memory"; return r; }
             r.value.structs[si].fields_count = fi;
             si++;
             state = PARSE_OUTSIDE;
+            if (header[i] == '\0') break;
             continue;
         } else if (state == PARSE_IN_STRUCT) {
             if (strncmp(&header[i], "float ", 6) == 0) {
@@ -86,7 +94,12 @@ parse_result parse_header(arena* a, char* header) {
                 cur_type = ast_double;
                 i += 6;
             } else {
-                r.err = "unknown type";
+                int start = i;
+                while (header[i] != ' ' && header[i] != '\0') i++;
+                int len = i - start;
+                char* msg = allocate(a, 48 + len);
+                if (msg) sprintf(msg, "unknown type '%.*s' at line %d", len, &header[start], line);
+                r.err = msg ? msg : "unknown type";
                 return r;
             }
             state = PARSE_READ_FIELD_NAME;
@@ -98,7 +111,12 @@ parse_result parse_header(arena* a, char* header) {
             while (header[i] != ';' && header[i] != ',' && header[i] != '\0') {
                 i++;
             }
-            if (header[i] == '\0') { r.err = "unexpected end of input"; return r; }
+            if (header[i] == '\0') {
+                char* msg = allocate(a, 48);
+                if (msg) sprintf(msg, "unexpected end of input at line %d", line);
+                r.err = msg ? msg : "unexpected end of input";
+                return r;
+            }
             int len = i - start;
             while (len > 0 && is_white_space(header[start + len - 1])) len--;
             r.value.structs[si].fields[fi].name = arena_copy_string(a, &header[start], len);

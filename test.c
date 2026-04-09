@@ -22,34 +22,31 @@ UTEST(parse, header) {
     ASSERT_EQ(ast_float,r.value.structs[0].fields[0].type);
 }
 
-// Bug #1: unknown type returns error
 UTEST(parse, unknown_type) {
     char buf[4096];
     arena a;
     create_arena(&a, buf, sizeof(buf));
     char* header =
-    "typedef struct {"
-        "unsigned int x;"
+    "typedef struct {\n"
+        "unsigned int x;\n"
     "} enemy;";
     parse_result r = parse_header(&a, header);
     ASSERT_TRUE(r.err);
-    ASSERT_STREQ("unknown type", r.err);
+    ASSERT_STREQ("unknown type 'unsigned' at line 2", r.err);
 }
 
-// Bug #2: missing semicolon returns error instead of reading past buffer
 UTEST(parse, missing_semicolon) {
     char buf[4096];
     arena a;
     create_arena(&a, buf, sizeof(buf));
     char* header =
-    "typedef struct {"
+    "typedef struct {\n"
         "int x";
     parse_result r = parse_header(&a, header);
     ASSERT_TRUE(r.err);
-    ASSERT_STREQ("unexpected end of input", r.err);
+    ASSERT_STREQ("unexpected end of input at line 2", r.err);
 }
 
-// Bug #5: out of memory returns error
 UTEST(parse, out_of_memory) {
     char buf[32];
     arena a;
@@ -65,7 +62,6 @@ UTEST(parse, out_of_memory) {
     ASSERT_STREQ("out of memory", r.err);
 }
 
-// Bug #6: trailing spaces in field names
 UTEST(parse, trailing_spaces_in_names) {
     char buf[4096];
     arena a;
@@ -122,6 +118,60 @@ UTEST(parse, multiple_structs) {
     ASSERT_EQ(ast_int, r.value.structs[1].fields[2].type);
     ASSERT_STREQ("damage", r.value.structs[1].fields[3].name);
     ASSERT_EQ(ast_float, r.value.structs[1].fields[3].type);
+}
+
+UTEST(parse, too_many_structs) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    // build a header with 65 structs
+    char header[65 * 40];
+    int offset = 0;
+    for (int i = 0; i < 65; i++) {
+        offset += sprintf(&header[offset], "typedef struct {int x;} s%d;", i);
+    }
+    parse_result r = parse_header(&a, header);
+    ASSERT_TRUE(r.err);
+    ASSERT_STREQ("more than 64 structs, too many structs", r.err);
+}
+
+UTEST(parse, missing_semicolon_after_name) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header =
+    "typedef struct {"
+        "int x;"
+    "} enemy";
+    parse_result r = parse_header(&a, header);
+    ASSERT_FALSE(r.err);
+    ASSERT_STREQ("enemy", r.value.structs[0].name);
+}
+
+UTEST(parse, empty_struct) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header =
+    "typedef struct {"
+    "} empty;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_FALSE(r.err);
+    ASSERT_STREQ("empty", r.value.structs[0].name);
+    ASSERT_EQ((size_t)0, r.value.structs[0].fields_count);
+}
+
+UTEST(parse, missing_struct_name) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header =
+    "typedef struct {\n"
+        "int x;\n"
+    "} ;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_TRUE(r.err);
+    ASSERT_STREQ("struct missing name at line 3", r.err);
 }
 
 /*
