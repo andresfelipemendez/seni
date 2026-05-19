@@ -21,4 +21,5 @@ static inline void* allocate(arena* a, size_t s) {
 }
 
 char* arena_copy_string(arena* a, const char* src, size_t len);
+char* arena_sprintf(arena* a, const char* fmt, ...);
 #endif

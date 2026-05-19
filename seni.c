@@ -1,4 +1,5 @@
 #include "seni.h"
+#include "arena.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -72,9 +73,7 @@ parse_result parse_header(arena* a, char* header) {
             }
             int len = i - start;
             if (len == 0) {
-                int n = snprintf(NULL, 0, "struct missing name at line %d", line) + 1;
-                char* msg = allocate(a, n);
-                if (msg) snprintf(msg, n, "struct missing name at line %d", line);
+                char* msg = arena_sprintf(a, "struct missing name at line %d", line);
                 r.err = msg ? msg : "struct missing name";
                 return r;
             }
@@ -102,9 +101,7 @@ parse_result parse_header(arena* a, char* header) {
                 int start = i;
                 while (header[i] != ' ' && header[i] != '\0') i++;
                 int len = i - start;
-                int n = snprintf(NULL, 0, "unknown type '%.*s' at line %d", len, &header[start], line) + 1;
-                char* msg = allocate(a, n);
-                if (msg) snprintf(msg, n, "unknown type '%.*s' at line %d", len, &header[start], line);
+                char* msg = arena_sprintf(a, "unknown type '%.*s' at line %d", len, &header[start], line);
                 r.err = msg ? msg : "unknown type";
                 return r;
             }
@@ -118,9 +115,7 @@ parse_result parse_header(arena* a, char* header) {
                 i++;
             }
             if (header[i] == '\0') {
-                int n = snprintf(NULL, 0, "unexpected end of input at line %d", line) + 1;
-                char* msg = allocate(a, n);
-                if (msg) snprintf(msg, n, "unexpected end of input at line %d", line);
+                char* msg = arena_sprintf(a, "unexpected end of input at line %d", line);
                 r.err = msg ? msg : "unexpected end of input";
                 return r;
             }
@@ -141,9 +136,19 @@ parse_result parse_header(arena* a, char* header) {
     return r;
 }
 
-diff diff_structs(char *old_header, char *new_header){
-    diff d;
-    ast old_header_ast;
-
-    return d;
+diff_result diff_structs(arena* a, char *old_header, char *new_header){
+    diff_result res = {0};
+    parse_result old_header_ast_res = parse_header(a, old_header);
+    if (old_header_ast_res.err) {
+        char* msg = arena_sprintf(a, "old_header error: %s", old_header_ast_res.err);
+        res.err = msg ? msg : old_header_ast_res.err;
+        return res;
+    }
+    ast old_header_ast = old_header_ast_res.value;
+    (void)old_header_ast;
+    parse_result new_header_ast_res = parse_header(a, new_header);
+    if (new_header_ast_res.err) {
+      
+    }
+    return res;
 }

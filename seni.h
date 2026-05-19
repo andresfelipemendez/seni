@@ -43,6 +43,11 @@ typedef struct {
     char* err;  // NULL = success
 } parse_result;
 
+typedef struct {
+    diff value;
+    char* err;  // NULL = success
+} diff_result;
+
 parse_result parse_header(arena* a, char* header);
-diff diff_structs(char* old_header, char* new_header);
+diff_result diff_structs(arena* a, char* old_header, char* new_header);
 #endif
