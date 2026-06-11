@@ -1,18 +1,18 @@
 #ifndef SENI_EMBED_H
 #define SENI_EMBED_H
 
-// Embeds a header file's bytes into the binary at build time and exports
-// them as `const char* seni_layout`. The hot-reloader reads this symbol from
-// the currently-loaded dll to obtain the layout it was compiled with — the
-// "old header" for diffing — since by reload time the header file on disk
-// has already been overwritten with the new layout.
-//
-// Usage (file scope, once per dll):
-//     #include "seni_embed.h"
-//     SENI_EMBED_LAYOUT("path/to/structs.h");
-//
-// The path is resolved by the assembler relative to the compiler's working
-// directory. Bytes are byte-identical to the file — no escaping, no codegen.
+/* Embeds a header file's bytes into the binary at build time and exports
+   them as `const char* seni_layout`. The hot-reloader reads this symbol from
+   the currently-loaded dll to obtain the layout it was compiled with -- the
+   "old header" for diffing -- since by reload time the header file on disk
+   has already been overwritten with the new layout.
+
+   Usage (file scope, once per dll):
+       #include "seni_embed.h"
+       SENI_EMBED_LAYOUT("path/to/structs.h");
+
+   The path is resolved by the assembler relative to the compiler's working
+   directory. Bytes are byte-identical to the file -- no escaping, no codegen. */
 
 #if defined(_WIN32)
 #define SENI_EMBED_EXPORT __declspec(dllexport)

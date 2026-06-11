@@ -11,15 +11,15 @@ char* arena_copy_string(arena* a, const char* src, size_t len) {
     return dst;
 }
 
+/* c89: no vsnprintf, so format into a fixed temp then copy into the arena.
+   callers only format short error messages; 1024 is plenty. */
 char* arena_sprintf(arena* a, const char* fmt, ...) {
+    char tmp[1024];
     va_list args;
+    int n;
     va_start(args, fmt);
-    int n = vsnprintf(NULL, 0, fmt, args) + 1;
+    n = vsprintf(tmp, fmt, args);
     va_end(args);
-    char* buf = allocate(a, n);
-    if (!buf) return NULL;
-    va_start(args, fmt);
-    vsnprintf(buf, n, fmt, args);
-    va_end(args);
-    return buf;
+    if (n < 0) return NULL;
+    return arena_copy_string(a, tmp, (size_t)n);
 }

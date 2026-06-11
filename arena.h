@@ -7,15 +7,16 @@ typedef struct {
     size_t offset;
 } arena;
 
-static inline void create_arena(arena* a, void* buf, size_t size) {
+static void create_arena(arena* a, void* buf, size_t size) {
     a->data = buf;
     a->size = size;
     a->offset = 0;
 }
 
-static inline void* allocate(arena* a, size_t s) {
+static void* allocate(arena* a, size_t s) {
+    void* ptr;
     if (a->offset + s > a->size) return NULL;
-    void* ptr = (char*)a->data + a->offset;
+    ptr = (char*)a->data + a->offset;
     a->offset += s;
     return ptr;
 }

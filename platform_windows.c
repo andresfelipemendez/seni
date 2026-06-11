@@ -14,7 +14,7 @@ const char* platform_lib_extension(void) {
 
 int platform_compile_shared(const char* src_path, const char* lib_path, const char* err_path) {
     char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "gcc -shared -o %s %s 2> %s", lib_path, src_path, err_path);
+    sprintf(cmd, "gcc -std=c89 -pedantic -shared -o %s %s 2> %s", lib_path, src_path, err_path);
     return system(cmd);
 }
 
@@ -25,7 +25,9 @@ platform_lib platform_load_lib(const char* path) {
 }
 
 void* platform_get_symbol(platform_lib lib, const char* name) {
-    return (void*)GetProcAddress((HMODULE)lib, name);
+    /* c89 forbids function-pointer -> object-pointer casts; launder through
+       an integer (size_t is pointer-sized on win32/win64) */
+    return (void*)(size_t)GetProcAddress((HMODULE)lib, name);
 }
 
 void platform_unload_lib(platform_lib lib) {
