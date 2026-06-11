@@ -109,9 +109,17 @@ parse_result parse_header(arena* a, char* header) {
             } else {
                 int start = i;
                 int len;
+                int k;
                 char* msg;
                 while (header[i] != ' ' && header[i] != '\0') i++;
                 len = i - start;
+                for (k = 0; k < len; k++) {
+                    if (header[start + k] == '*') {
+                        msg = arena_sprintf(a, "pointer type '%.*s' at line %d, pointers are not supported, use an index or handle", len, &header[start], line);
+                        r.err = msg ? msg : "pointer type not supported";
+                        return r;
+                    }
+                }
                 msg = arena_sprintf(a, "unknown type '%.*s' at line %d", len, &header[start], line);
                 r.err = msg ? msg : "unknown type";
                 return r;
@@ -123,6 +131,8 @@ parse_result parse_header(arena* a, char* header) {
         } else if (state == PARSE_READ_FIELD_NAME) {
             int start = i;
             int len;
+            int k;
+            size_t arr_size = 0;
             while (header[i] != ';' && header[i] != ',' && header[i] != '\0') {
                 i++;
             }
@@ -133,9 +143,36 @@ parse_result parse_header(arena* a, char* header) {
             }
             len = i - start;
             while (len > 0 && is_white_space(header[start + len - 1])) len--;
+            for (k = 0; k < len; k++) {
+                if (header[start + k] == '*') {
+                    char* msg = arena_sprintf(a, "pointer field '%.*s' at line %d, pointers are not supported, use an index or handle", len, &header[start], line);
+                    r.err = msg ? msg : "pointer field not supported";
+                    return r;
+                }
+            }
+            for (k = 0; k < len && header[start + k] != '['; k++);
+            if (k < len) {
+                int p = k + 1;
+                int digits = 0;
+                size_t v = 0;
+                while (p < len && header[start + p] >= '0' && header[start + p] <= '9') {
+                    v = v * 10 + (size_t)(header[start + p] - '0');
+                    digits++;
+                    p++;
+                }
+                if (digits == 0 || v == 0 || p >= len || header[start + p] != ']') {
+                    char* msg = arena_sprintf(a, "invalid array size for field '%.*s' at line %d", len, &header[start], line);
+                    r.err = msg ? msg : "invalid array size";
+                    return r;
+                }
+                arr_size = v;
+                len = k;
+                while (len > 0 && is_white_space(header[start + len - 1])) len--;
+            }
             r.value.structs[si].fields[fi].name = arena_copy_string(a, &header[start], len);
             if (!r.value.structs[si].fields[fi].name) { r.err = "out of memory"; return r; }
             r.value.structs[si].fields[fi].type = cur_type;
+            r.value.structs[si].fields[fi].array_size = arr_size;
             fi++;
             if (header[i] == ',') {
                 state = PARSE_READ_FIELD_NAME;
@@ -185,6 +222,13 @@ static void sb_appendf(strbuf* b, const char* fmt, ...) {
     b->a->offset -= 1;
 }
 
+static void emit_field(strbuf* b, ast_field* f) {
+    if (f->array_size > 0)
+        sb_appendf(b, "%s %s[%lu]; ", type_name(f->type), f->name, (unsigned long)f->array_size);
+    else
+        sb_appendf(b, "%s %s; ", type_name(f->type), f->name);
+}
+
 generate_result generate_migration(arena* a, diff d) {
     generate_result r = {0};
     strbuf b;
@@ -201,15 +245,19 @@ generate_result generate_migration(arena* a, diff d) {
     for (i = 0; i < d.struct_count; i++) {
         struct_diff* sd = &d.structs[i];
         size_t j;
+        int need_j = 0;
+        for (j = 0; j < sd->ops_count; j++) {
+            if (sd->ops[j].old_array_size > 0 || sd->ops[j].new_array_size > 0) need_j = 1;
+        }
         if (sd->old_count > 0) {
             sb_appendf(&b, "typedef struct { ");
             for (j = 0; j < sd->old_count; j++)
-                sb_appendf(&b, "%s %s; ", type_name(sd->old_fields[j].type), sd->old_fields[j].name);
+                emit_field(&b, &sd->old_fields[j]);
             sb_appendf(&b, "} %s_old;\n", sd->name);
         }
         sb_appendf(&b, "typedef struct { ");
         for (j = 0; j < sd->new_count; j++)
-            sb_appendf(&b, "%s %s; ", type_name(sd->new_fields[j].type), sd->new_fields[j].name);
+            emit_field(&b, &sd->new_fields[j]);
         sb_appendf(&b, "} %s_new;\n", sd->name);
 
         sb_appendf(&b, "SENI_EXPORT void migrate_%s(void* old_p, void* new_p, size_t count) {\n", sd->name);
@@ -217,15 +265,38 @@ generate_result generate_migration(arena* a, diff d) {
             sb_appendf(&b, "    %s_old* o = (%s_old*)old_p;\n", sd->name, sd->name);
         sb_appendf(&b, "    %s_new* n = (%s_new*)new_p;\n", sd->name, sd->name);
         sb_appendf(&b, "    size_t i;\n");
+        if (need_j)
+            sb_appendf(&b, "    size_t j;\n");
         if (sd->old_count == 0)
             sb_appendf(&b, "    (void)old_p;\n");
         sb_appendf(&b, "    for (i = 0; i < count; i++) {\n");
         for (j = 0; j < sd->ops_count; j++) {
             field_op* op = &sd->ops[j];
-            if (op->kind == field_op_copy)
-                sb_appendf(&b, "        n[i].%s = o[i].%s;\n", op->name, op->name);
-            else
-                sb_appendf(&b, "        n[i].%s = 0;\n", op->name);
+            if (op->kind == field_op_copy) {
+                if (op->old_array_size == 0 && op->new_array_size == 0) {
+                    sb_appendf(&b, "        n[i].%s = o[i].%s;\n", op->name, op->name);
+                } else if (op->old_array_size > 0 && op->new_array_size > 0) {
+                    size_t m = op->old_array_size < op->new_array_size ? op->old_array_size : op->new_array_size;
+                    sb_appendf(&b, "        for (j = 0; j < %lu; j++) n[i].%s[j] = o[i].%s[j];\n",
+                               (unsigned long)m, op->name, op->name);
+                    if (op->new_array_size > m)
+                        sb_appendf(&b, "        for (j = %lu; j < %lu; j++) n[i].%s[j] = 0;\n",
+                                   (unsigned long)m, (unsigned long)op->new_array_size, op->name);
+                } else if (op->old_array_size == 0) { /* scalar -> array */
+                    sb_appendf(&b, "        n[i].%s[0] = o[i].%s;\n", op->name, op->name);
+                    if (op->new_array_size > 1)
+                        sb_appendf(&b, "        for (j = 1; j < %lu; j++) n[i].%s[j] = 0;\n",
+                                   (unsigned long)op->new_array_size, op->name);
+                } else { /* array -> scalar */
+                    sb_appendf(&b, "        n[i].%s = o[i].%s[0];\n", op->name, op->name);
+                }
+            } else {
+                if (op->new_array_size == 0)
+                    sb_appendf(&b, "        n[i].%s = 0;\n", op->name);
+                else
+                    sb_appendf(&b, "        for (j = 0; j < %lu; j++) n[i].%s[j] = 0;\n",
+                               (unsigned long)op->new_array_size, op->name);
+            }
         }
         sb_appendf(&b, "    }\n}\n\n");
     }
@@ -292,8 +363,14 @@ diff_result diff_structs(arena* a, char *old_header, char *new_header){
             op->name = ns->fields[f].name;
             op->type = ns->fields[f].type;
             op->kind = field_op_zero;
+            op->old_array_size = 0;
+            op->new_array_size = ns->fields[f].array_size;
             for (g = 0; os && g < os->fields_count; g++) {
-                if (strcmp(os->fields[g].name, ns->fields[f].name) == 0) { op->kind = field_op_copy; break; }
+                if (strcmp(os->fields[g].name, ns->fields[f].name) == 0) {
+                    op->kind = field_op_copy;
+                    op->old_array_size = os->fields[g].array_size;
+                    break;
+                }
             }
         }
     }

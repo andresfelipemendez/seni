@@ -254,6 +254,38 @@ UTEST(e2e, layout_embedded_in_dll) {
     platform_unload_lib(game);
 }
 
+UTEST(e2e, array_resize) {
+    char buf[16384];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    platform_lib mod = NULL;
+    migrate_fn migrate = build_migration(&a, "fixtures/thing_v1.h", "fixtures/thing_v2.h",
+                                         "array_resize", "thing", &mod);
+    ASSERT_TRUE(migrate != NULL);
+
+    typedef struct { float pos[4]; int id; } thing_v1;
+    typedef struct { float pos[2]; int id; float vel[3]; } thing_v2;
+
+    thing_v1 old_block[2] = {
+        { {1.0f, 2.0f, 3.0f, 4.0f}, 10 },
+        { {5.0f, 6.0f, 7.0f, 8.0f}, 20 },
+    };
+    thing_v2 new_block[2];
+    memset(new_block, 0xCD, sizeof(new_block));
+
+    migrate(old_block, new_block, 2);
+
+    for (int i = 0; i < 2; i++) {
+        ASSERT_EQ(old_block[i].pos[0], new_block[i].pos[0]);
+        ASSERT_EQ(old_block[i].pos[1], new_block[i].pos[1]);
+        ASSERT_EQ(old_block[i].id, new_block[i].id);
+        for (int j = 0; j < 3; j++) {
+            ASSERT_EQ(0.0f, new_block[i].vel[j]);
+        }
+    }
+    platform_unload_lib(mod);
+}
+
 UTEST(e2e, identical) {
     char buf[16384];
     arena a;

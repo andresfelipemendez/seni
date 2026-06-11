@@ -12,6 +12,14 @@ desync — the layout travels inside the binary it describes.
 using utest for testing
 https://github.com/sheredom/utest.h
 
+## supported fields
+
+scalars (`int`, `float`, `char`, `double`) and fixed-size arrays of them.
+array resize copies `min(old, new)` elements and zeroes the tail; scalar <->
+array conversions go through element 0. pointers are rejected with a parse
+error — a pointer can dangle into the unloaded dll or reference old-layout
+memory, use indices/handles in hot-reloaded state instead.
+
 ## tests
 
 `test.bat` (windows) or `test.sh` (linux, e.g. `wsl sh test.sh`) runs unit

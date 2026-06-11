@@ -188,6 +188,113 @@ UTEST(parse, line_count_after_closing_brace) {
     ASSERT_STREQ("struct missing name at line 4", r.err);
 }
 
+UTEST(parse, array_field) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header =
+    "typedef struct {"
+        "float pos[4];"
+        "char name[32];"
+        "int id;"
+    "} thing;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_FALSE(r.err);
+    ASSERT_EQ((size_t)3, r.value.structs[0].fields_count);
+    ASSERT_STREQ("pos", r.value.structs[0].fields[0].name);
+    ASSERT_EQ((size_t)4, r.value.structs[0].fields[0].array_size);
+    ASSERT_EQ(ast_float, r.value.structs[0].fields[0].type);
+    ASSERT_STREQ("name", r.value.structs[0].fields[1].name);
+    ASSERT_EQ((size_t)32, r.value.structs[0].fields[1].array_size);
+    ASSERT_STREQ("id", r.value.structs[0].fields[2].name);
+    ASSERT_EQ((size_t)0, r.value.structs[0].fields[2].array_size);
+}
+
+UTEST(parse, pointer_field) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header =
+    "typedef struct {\n"
+        "float *p;\n"
+    "} s;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_TRUE(r.err);
+    ASSERT_STREQ("pointer field '*p' at line 2, pointers are not supported, use an index or handle", r.err);
+}
+
+UTEST(parse, pointer_type) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header =
+    "typedef struct {\n"
+        "float* p;\n"
+    "} s;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_TRUE(r.err);
+    ASSERT_STREQ("pointer type 'float*' at line 2, pointers are not supported, use an index or handle", r.err);
+}
+
+UTEST(parse, bad_array_size) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header = "typedef struct {int x[a];} s;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_TRUE(r.err);
+    ASSERT_STREQ("invalid array size for field 'x[a]' at line 1", r.err);
+}
+
+UTEST(diff, array_resize) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* old_header =
+    "typedef struct {"
+        "float pos[4];"
+    "} thing;";
+    char* new_header =
+    "typedef struct {"
+        "float pos[2];"
+        "float vel[3];"
+    "} thing;";
+    diff_result r = diff_structs(&a, old_header, new_header);
+    ASSERT_FALSE(r.err);
+    struct_diff* sd = &r.value.structs[0];
+    ASSERT_EQ((size_t)2, sd->ops_count);
+    ASSERT_EQ(field_op_copy, sd->ops[0].kind);
+    ASSERT_STREQ("pos", sd->ops[0].name);
+    ASSERT_EQ((size_t)4, sd->ops[0].old_array_size);
+    ASSERT_EQ((size_t)2, sd->ops[0].new_array_size);
+    ASSERT_EQ(field_op_zero, sd->ops[1].kind);
+    ASSERT_STREQ("vel", sd->ops[1].name);
+    ASSERT_EQ((size_t)3, sd->ops[1].new_array_size);
+}
+
+UTEST(generate, arrays) {
+    char buf[16384];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* old_header =
+    "typedef struct {"
+        "float pos[4];"
+    "} thing;";
+    char* new_header =
+    "typedef struct {"
+        "float pos[2];"
+        "float vel[3];"
+    "} thing;";
+    diff_result d = diff_structs(&a, old_header, new_header);
+    ASSERT_FALSE(d.err);
+    generate_result g = generate_migration(&a, d.value);
+    ASSERT_FALSE(g.err);
+    ASSERT_TRUE(strstr(g.code, "typedef struct { float pos[4]; } thing_old;") != NULL);
+    ASSERT_TRUE(strstr(g.code, "typedef struct { float pos[2]; float vel[3]; } thing_new;") != NULL);
+    ASSERT_TRUE(strstr(g.code, "for (j = 0; j < 2; j++) n[i].pos[j] = o[i].pos[j];") != NULL);
+    ASSERT_TRUE(strstr(g.code, "for (j = 0; j < 3; j++) n[i].vel[j] = 0;") != NULL);
+}
+
 UTEST(diff, add_field) {
     char buf[8192];
     arena a;

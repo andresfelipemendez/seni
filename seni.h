@@ -14,6 +14,7 @@ typedef enum {
 typedef struct {
     char* name;
     ast_type type;
+    size_t array_size;  /* 0 = scalar */
 } ast_field;
 
 typedef struct {
@@ -31,8 +32,10 @@ typedef enum { field_op_copy, field_op_zero } field_op_kind;
 
 typedef struct {
     field_op_kind kind;
-    char* name;        /* field name in new struct */
-    ast_type type;     /* type in new struct */
+    char* name;              /* field name in new struct */
+    ast_type type;           /* type in new struct */
+    size_t old_array_size;   /* 0 = scalar; meaningful when kind == copy */
+    size_t new_array_size;   /* 0 = scalar */
 } field_op;
 
 typedef struct {
