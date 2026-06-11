@@ -25,7 +25,11 @@ static char* read_file(arena* a, const char* path) {
     fseek(f, 0, SEEK_SET);
     char* buf = allocate(a, (size_t)sz + 1);
     if (!buf) { fclose(f); return NULL; }
-    fread(buf, 1, (size_t)sz, f);
+    if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+        fprintf(stderr, "short read on %s\n", path);
+        fclose(f);
+        return NULL;
+    }
     buf[sz] = '\0';
     fclose(f);
     return buf;

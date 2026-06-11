@@ -7,7 +7,9 @@
    "old header" for diffing -- since by reload time the header file on disk
    has already been overwritten with the new layout.
 
-   Usage (file scope, once per dll):
+   Usage (file scope, ONCE per dll -- the macro defines the global asm label
+   seni_layout_data and the exported seni_layout symbol; a second use in the
+   same dll is a duplicate-symbol link error):
        #include "seni_embed.h"
        SENI_EMBED_LAYOUT("path/to/structs.h");
 

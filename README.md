@@ -12,6 +12,14 @@ desync — the layout travels inside the binary it describes.
 using utest for testing
 https://github.com/sheredom/utest.h
 
+## header format
+
+the parser is deliberately small and matches `typedef struct {` literally:
+one space between the words, brace on the same line. comments inside struct
+bodies are not supported (anything between structs is ignored, so file-level
+comments are fine). struct and field names max 64 chars, array sizes max
+65536. keep migrated state in seni-clean headers.
+
 ## supported fields
 
 scalars (`int`, `float`, `char`, `double`) and fixed-size arrays of them.

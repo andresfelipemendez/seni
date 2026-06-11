@@ -124,7 +124,7 @@ parse_result parse_header(arena* a, char* header) {
                 int echo;
                 int k;
                 char* msg;
-                while (header[i] != ' ' && header[i] != '\0') i++;
+                while (header[i] != '\0' && !is_white_space(header[i])) i++;
                 len = i - start;
                 echo = len > MAX_TOKEN_ECHO ? MAX_TOKEN_ECHO : len;
                 for (k = 0; k < len; k++) {
@@ -148,6 +148,7 @@ parse_result parse_header(arena* a, char* header) {
             int k;
             size_t arr_size = 0;
             while (header[i] != ';' && header[i] != ',' && header[i] != '\0') {
+                if (header[i] == '\n') line++;
                 i++;
             }
             if (header[i] == '\0') {
@@ -165,7 +166,7 @@ parse_result parse_header(arena* a, char* header) {
                     return r;
                 }
             }
-            for (k = 0; k < len && header[start + k] != '['; k++);
+            for (k = 0; k < len && header[start + k] != '['; k++) {}
             if (k < len) {
                 int p = k + 1;
                 int digits = 0;
@@ -277,21 +278,24 @@ generate_result generate_migration(arena* a, diff d) {
         for (j = 0; j < sd->ops_count; j++) {
             if (sd->ops[j].old_array_size > 0 || sd->ops[j].new_array_size > 0) need_j = 1;
         }
+        /* seni__ prefix keeps generated typedefs from colliding with user
+           structs named e.g. 'enemy_old'. migrate_<name> stays unprefixed:
+           it is the symbol engines look up. */
         if (sd->old_count > 0) {
             sb_appendf(&b, "typedef struct { ");
             for (j = 0; j < sd->old_count; j++)
                 emit_field(&b, &sd->old_fields[j]);
-            sb_appendf(&b, "} %s_old;\n", sd->name);
+            sb_appendf(&b, "} seni__%s_old;\n", sd->name);
         }
         sb_appendf(&b, "typedef struct { ");
         for (j = 0; j < sd->new_count; j++)
             emit_field(&b, &sd->new_fields[j]);
-        sb_appendf(&b, "} %s_new;\n", sd->name);
+        sb_appendf(&b, "} seni__%s_new;\n", sd->name);
 
         sb_appendf(&b, "SENI_EXPORT void migrate_%s(void* old_p, void* new_p, size_t count) {\n", sd->name);
         if (sd->old_count > 0)
-            sb_appendf(&b, "    %s_old* o = (%s_old*)old_p;\n", sd->name, sd->name);
-        sb_appendf(&b, "    %s_new* n = (%s_new*)new_p;\n", sd->name, sd->name);
+            sb_appendf(&b, "    seni__%s_old* o = (seni__%s_old*)old_p;\n", sd->name, sd->name);
+        sb_appendf(&b, "    seni__%s_new* n = (seni__%s_new*)new_p;\n", sd->name, sd->name);
         sb_appendf(&b, "    size_t i;\n");
         if (need_j)
             sb_appendf(&b, "    size_t j;\n");
@@ -329,7 +333,8 @@ generate_result generate_migration(arena* a, diff d) {
         sb_appendf(&b, "    }\n}\n\n");
     }
     if (b.err) { r.err = b.err; return r; }
-    allocate(a, 1); /* claim the final null terminator so later allocations don't clobber it */
+    /* claim the final null terminator so later allocations don't clobber it */
+    if (!allocate_bytes(a, 1)) { r.err = "out of memory"; return r; }
     r.code = b.start;
     return r;
 }

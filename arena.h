@@ -1,6 +1,6 @@
 #ifndef ARENA_H
 #define ARENA_H
-#include "stdio.h"
+#include <stddef.h>
 typedef struct {
     void* data;
     size_t size;

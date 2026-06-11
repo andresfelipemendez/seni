@@ -305,6 +305,37 @@ UTEST(diff, type_change_rejected) {
     ASSERT_STREQ("field 'health' in struct 'enemy' changed type from int to float, cannot migrate", r.err);
 }
 
+/* nit: field-name token scan didn't count newlines -> later error lines drifted */
+UTEST(parse, line_count_across_field_name) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header =
+    "typedef struct {\n"
+        "int x\n"
+        ";\n"
+        "float* p;\n"
+    "} s;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_TRUE(r.err);
+    ASSERT_STREQ("pointer type 'float*' at line 4, pointers are not supported, use an index or handle", r.err);
+}
+
+/* nit: unknown-type token only stopped at ' ', swallowing newlines and the next line */
+UTEST(parse, unknown_type_followed_by_newline) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header =
+    "typedef struct {\n"
+        "long\n"
+        "x;\n"
+    "} s;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_TRUE(r.err);
+    ASSERT_STREQ("unknown type 'long' at line 2", r.err);
+}
+
 UTEST(parse, array_field) {
     char buf[4096];
     arena a;
@@ -406,8 +437,8 @@ UTEST(generate, arrays) {
     ASSERT_FALSE(d.err);
     generate_result g = generate_migration(&a, d.value);
     ASSERT_FALSE(g.err);
-    ASSERT_TRUE(strstr(g.code, "typedef struct { float pos[4]; } thing_old;") != NULL);
-    ASSERT_TRUE(strstr(g.code, "typedef struct { float pos[2]; float vel[3]; } thing_new;") != NULL);
+    ASSERT_TRUE(strstr(g.code, "typedef struct { float pos[4]; } seni__thing_old;") != NULL);
+    ASSERT_TRUE(strstr(g.code, "typedef struct { float pos[2]; float vel[3]; } seni__thing_new;") != NULL);
     ASSERT_TRUE(strstr(g.code, "for (j = 0; j < 2; j++) n[i].pos[j] = o[i].pos[j];") != NULL);
     ASSERT_TRUE(strstr(g.code, "for (j = 0; j < 3; j++) n[i].vel[j] = 0;") != NULL);
 }
@@ -517,8 +548,8 @@ UTEST(generate, add_field) {
     ASSERT_FALSE(g.err);
     ASSERT_TRUE(g.code != NULL);
     ASSERT_TRUE(strstr(g.code, "#include <stddef.h>") != NULL);
-    ASSERT_TRUE(strstr(g.code, "typedef struct { float x; float y; } enemy_old;") != NULL);
-    ASSERT_TRUE(strstr(g.code, "typedef struct { float x; float y; int health; } enemy_new;") != NULL);
+    ASSERT_TRUE(strstr(g.code, "typedef struct { float x; float y; } seni__enemy_old;") != NULL);
+    ASSERT_TRUE(strstr(g.code, "typedef struct { float x; float y; int health; } seni__enemy_new;") != NULL);
     ASSERT_TRUE(strstr(g.code, "#define SENI_EXPORT __declspec(dllexport)") != NULL);
     ASSERT_TRUE(strstr(g.code, "SENI_EXPORT void migrate_enemy(void* old_p, void* new_p, size_t count)") != NULL);
     ASSERT_TRUE(strstr(g.code, "n[i].x = o[i].x;") != NULL);
@@ -540,12 +571,17 @@ UTEST(generate, new_struct_no_old_typedef) {
 }
 
 UTEST(generate, out_of_memory) {
-    char small[256];
+    /* diff in a roomy arena, generate into a tiny one: OOM is guaranteed
+       regardless of how internal struct sizes evolve */
+    char big[8192];
+    char small[64];
     arena a;
-    create_arena(&a, small, sizeof(small));
+    arena gen;
+    create_arena(&a, big, sizeof(big));
+    create_arena(&gen, small, sizeof(small));
     diff_result d = diff_structs(&a, "typedef struct {int x;} s;", "typedef struct {int x;} s;");
     ASSERT_FALSE(d.err);
-    generate_result g = generate_migration(&a, d.value);
+    generate_result g = generate_migration(&gen, d.value);
     ASSERT_TRUE(g.err);
     ASSERT_STREQ("out of memory", g.err);
 }
