@@ -6,4 +6,6 @@ gcc test.c -o test.exe || exit /b 1
 gcc test_e2e.c -o test_e2e.exe || exit /b 1
 .\test_e2e.exe || exit /b 1
 gcc test_fuzz.c -o test_fuzz.exe || exit /b 1
-.\test_fuzz.exe
+.\test_fuzz.exe || exit /b 1
+gcc test_stress.c -o test_stress.exe || exit /b 1
+.\test_stress.exe
