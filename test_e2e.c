@@ -200,6 +200,60 @@ UTEST(e2e, multiple_structs) {
     platform_unload_lib(mod);
 }
 
+// hot-reload scenario: the old header is not on disk anymore (the save
+// overwrote it) — it lives embedded inside the currently-loaded game dll.
+// build a fake game dll that embeds enemy_v1.h via seni_embed.h, pull the
+// layout back out through the seni_layout symbol, diff against the new
+// header file, migrate.
+UTEST(e2e, layout_embedded_in_dll) {
+    char buf[16384];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+
+    const char* game_src =
+        "#include \"../seni_embed.h\"\n"  // generated source lives in build/
+        "SENI_EMBED_LAYOUT(\"fixtures/enemy_v1.h\");\n";
+    platform_lib game = compile_and_load(game_src, "game_v1");
+    ASSERT_TRUE(game != NULL);
+
+    const char** layout_p = (const char**)platform_get_symbol(game, "seni_layout");
+    ASSERT_TRUE(layout_p != NULL);
+    const char* old_header = *layout_p;
+
+    // embedded bytes must be identical to the file gcc compiled against
+    char* file_header = read_file(&a, "fixtures/enemy_v1.h");
+    ASSERT_TRUE(file_header != NULL);
+    ASSERT_STREQ(file_header, old_header);
+
+    char* new_header = read_file(&a, "fixtures/enemy_v2.h");
+    ASSERT_TRUE(new_header != NULL);
+    diff_result d = diff_structs(&a, (char*)old_header, new_header);
+    ASSERT_FALSE(d.err);
+    generate_result g = generate_migration(&a, d.value);
+    ASSERT_FALSE(g.err);
+    platform_lib mod = compile_and_load(g.code, "layout_embedded_migration");
+    ASSERT_TRUE(mod != NULL);
+    migrate_fn migrate = (migrate_fn)platform_get_symbol(mod, "migrate_enemy");
+    ASSERT_TRUE(migrate != NULL);
+
+    typedef struct { float x, y; } enemy_v1;
+    typedef struct { float x, y; int health; } enemy_v2;
+
+    enemy_v1 old_block[3] = { {1.0f, 2.0f}, {3.0f, 4.0f}, {5.0f, 6.0f} };
+    enemy_v2 new_block[3];
+    memset(new_block, 0xCD, sizeof(new_block));
+
+    migrate(old_block, new_block, 3);
+
+    for (int i = 0; i < 3; i++) {
+        ASSERT_EQ(old_block[i].x, new_block[i].x);
+        ASSERT_EQ(old_block[i].y, new_block[i].y);
+        ASSERT_EQ(0, new_block[i].health);
+    }
+    platform_unload_lib(mod);
+    platform_unload_lib(game);
+}
+
 UTEST(e2e, identical) {
     char buf[16384];
     arena a;

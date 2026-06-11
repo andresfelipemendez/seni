@@ -2,6 +2,13 @@
 
 inspired by sql migration this is a library to generate memory migration code for hotreloading dlls it will diff previous structs and new ones, from there generate the code to migrate the existing memory to the new layout when hot-reloading
 
+the "old" header comes from the running dll itself: `seni_embed.h` embeds the
+header bytes into the dll at build time (assembler `.incbin`, no codegen step)
+and exports them as `const char* seni_layout`. at reload time the engine reads
+that symbol from the currently-loaded dll, diffs it against the new header on
+disk, generates + compiles the migration, runs it, then swaps dlls. this can't
+desync — the layout travels inside the binary it describes.
+
 using utest for testing
 https://github.com/sheredom/utest.h
 
