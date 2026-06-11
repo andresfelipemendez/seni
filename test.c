@@ -295,7 +295,8 @@ UTEST(generate, add_field) {
     ASSERT_TRUE(strstr(g.code, "#include <stddef.h>") != NULL);
     ASSERT_TRUE(strstr(g.code, "typedef struct { float x; float y; } enemy_old;") != NULL);
     ASSERT_TRUE(strstr(g.code, "typedef struct { float x; float y; int health; } enemy_new;") != NULL);
-    ASSERT_TRUE(strstr(g.code, "__declspec(dllexport) void migrate_enemy(void* old_p, void* new_p, size_t count)") != NULL);
+    ASSERT_TRUE(strstr(g.code, "#define SENI_EXPORT __declspec(dllexport)") != NULL);
+    ASSERT_TRUE(strstr(g.code, "SENI_EXPORT void migrate_enemy(void* old_p, void* new_p, size_t count)") != NULL);
     ASSERT_TRUE(strstr(g.code, "n[i].x = o[i].x;") != NULL);
     ASSERT_TRUE(strstr(g.code, "n[i].y = o[i].y;") != NULL);
     ASSERT_TRUE(strstr(g.code, "n[i].health = 0;") != NULL);

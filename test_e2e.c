@@ -1,4 +1,11 @@
-#include <windows.h>  // must come before utest.h so utest uses windows.h's LARGE_INTEGER
+// platform impl first: on windows it pulls in windows.h, which must come
+// before utest.h so utest uses windows.h's LARGE_INTEGER
+#include "platform.h"
+#if defined(_WIN32)
+#include "platform_windows.c"
+#else
+#include "platform_linux.c"
+#endif
 #include "utest.h"
 #include "seni.h"
 #include "arena.h"
@@ -24,20 +31,19 @@ static char* read_file(arena* a, const char* path) {
     return buf;
 }
 
-// writes code to build/<name>.c, compiles to build/<name>.dll, loads it.
+// writes code to build/<name>.c, compiles to build/<name>.<dll|so>, loads it.
 // on gcc failure prints the generated code + gcc stderr and returns NULL.
-static HMODULE compile_and_load(const char* code, const char* name) {
-    char src_path[256], dll_path[256], err_path[256], cmd[1024];
-    CreateDirectoryA("build", NULL);
+static platform_lib compile_and_load(const char* code, const char* name) {
+    char src_path[256], lib_path[256], err_path[256];
+    platform_make_dir("build");
     snprintf(src_path, sizeof(src_path), "build/%s.c", name);
-    snprintf(dll_path, sizeof(dll_path), "build/%s.dll", name);
+    snprintf(lib_path, sizeof(lib_path), "build/%s.%s", name, platform_lib_extension());
     snprintf(err_path, sizeof(err_path), "build/%s.err", name);
     FILE* f = fopen(src_path, "wb");
     if (!f) { fprintf(stderr, "cannot write %s\n", src_path); return NULL; }
     fputs(code, f);
     fclose(f);
-    snprintf(cmd, sizeof(cmd), "gcc -shared -o %s %s 2> %s", dll_path, src_path, err_path);
-    if (system(cmd) != 0) {
+    if (platform_compile_shared(src_path, lib_path, err_path) != 0) {
         fprintf(stderr, "gcc failed for %s\ngenerated code:\n%s\n", src_path, code);
         FILE* e = fopen(err_path, "rb");
         if (e) {
@@ -47,16 +53,14 @@ static HMODULE compile_and_load(const char* code, const char* name) {
         }
         return NULL;
     }
-    HMODULE m = LoadLibraryA(dll_path);
-    if (!m) fprintf(stderr, "LoadLibrary failed for %s (error %lu)\n", dll_path, GetLastError());
-    return m;
+    return platform_load_lib(lib_path);
 }
 
 typedef void (*migrate_fn)(void* old_p, void* new_p, size_t count);
 
 // pipeline: read both fixtures, diff, generate, compile, load, return migrate_<struct_name>
 static migrate_fn build_migration(arena* a, const char* old_path, const char* new_path,
-                                  const char* test_name, const char* struct_name, HMODULE* out_mod) {
+                                  const char* test_name, const char* struct_name, platform_lib* out_mod) {
     char* old_header = read_file(a, old_path);
     char* new_header = read_file(a, new_path);
     if (!old_header || !new_header) return NULL;
@@ -64,13 +68,13 @@ static migrate_fn build_migration(arena* a, const char* old_path, const char* ne
     if (d.err) { fprintf(stderr, "diff error: %s\n", d.err); return NULL; }
     generate_result g = generate_migration(a, d.value);
     if (g.err) { fprintf(stderr, "generate error: %s\n", g.err); return NULL; }
-    HMODULE m = compile_and_load(g.code, test_name);
+    platform_lib m = compile_and_load(g.code, test_name);
     if (!m) return NULL;
     *out_mod = m;
     char sym[128];
     snprintf(sym, sizeof(sym), "migrate_%s", struct_name);
-    migrate_fn fn = (migrate_fn)(void*)GetProcAddress(m, sym);
-    if (!fn) fprintf(stderr, "GetProcAddress failed for symbol %s\n", sym);
+    migrate_fn fn = (migrate_fn)platform_get_symbol(m, sym);
+    if (!fn) fprintf(stderr, "symbol not found: %s\n", sym);
     return fn;
 }
 
@@ -78,7 +82,7 @@ UTEST(e2e, add_field) {
     char buf[16384];
     arena a;
     create_arena(&a, buf, sizeof(buf));
-    HMODULE mod = NULL;
+    platform_lib mod = NULL;
     migrate_fn migrate = build_migration(&a, "fixtures/enemy_v1.h", "fixtures/enemy_v2.h",
                                          "add_field", "enemy", &mod);
     ASSERT_TRUE(migrate != NULL);
@@ -97,14 +101,14 @@ UTEST(e2e, add_field) {
         ASSERT_EQ(old_block[i].y, new_block[i].y);
         ASSERT_EQ(0, new_block[i].health);
     }
-    FreeLibrary(mod);
+    platform_unload_lib(mod);
 }
 
 UTEST(e2e, remove_field) {
     char buf[16384];
     arena a;
     create_arena(&a, buf, sizeof(buf));
-    HMODULE mod = NULL;
+    platform_lib mod = NULL;
     migrate_fn migrate = build_migration(&a, "fixtures/enemy_v2.h", "fixtures/enemy_v1.h",
                                          "remove_field", "enemy", &mod);
     ASSERT_TRUE(migrate != NULL);
@@ -122,14 +126,14 @@ UTEST(e2e, remove_field) {
         ASSERT_EQ(old_block[i].x, new_block[i].x);
         ASSERT_EQ(old_block[i].y, new_block[i].y);
     }
-    FreeLibrary(mod);
+    platform_unload_lib(mod);
 }
 
 UTEST(e2e, reorder_fields) {
     char buf[16384];
     arena a;
     create_arena(&a, buf, sizeof(buf));
-    HMODULE mod = NULL;
+    platform_lib mod = NULL;
     migrate_fn migrate = build_migration(&a, "fixtures/reorder_v1.h", "fixtures/reorder_v2.h",
                                          "reorder_fields", "enemy", &mod);
     ASSERT_TRUE(migrate != NULL);
@@ -148,7 +152,7 @@ UTEST(e2e, reorder_fields) {
         ASSERT_EQ(old_block[i].health, new_block[i].health);
         ASSERT_EQ(old_block[i].speed, new_block[i].speed);
     }
-    FreeLibrary(mod);
+    platform_unload_lib(mod);
 }
 
 UTEST(e2e, multiple_structs) {
@@ -163,11 +167,11 @@ UTEST(e2e, multiple_structs) {
     ASSERT_FALSE(d.err);
     generate_result g = generate_migration(&a, d.value);
     ASSERT_FALSE(g.err);
-    HMODULE mod = compile_and_load(g.code, "multiple_structs");
+    platform_lib mod = compile_and_load(g.code, "multiple_structs");
     ASSERT_TRUE(mod != NULL);
 
-    migrate_fn migrate_enemy_fn = (migrate_fn)(void*)GetProcAddress(mod, "migrate_enemy");
-    migrate_fn migrate_player_fn = (migrate_fn)(void*)GetProcAddress(mod, "migrate_player");
+    migrate_fn migrate_enemy_fn = (migrate_fn)platform_get_symbol(mod, "migrate_enemy");
+    migrate_fn migrate_player_fn = (migrate_fn)platform_get_symbol(mod, "migrate_player");
     ASSERT_TRUE(migrate_enemy_fn != NULL);
     ASSERT_TRUE(migrate_player_fn != NULL);
 
@@ -193,14 +197,14 @@ UTEST(e2e, multiple_structs) {
     ASSERT_EQ(1234, new_players[0].score);
     ASSERT_EQ(0, new_players[0].level);
 
-    FreeLibrary(mod);
+    platform_unload_lib(mod);
 }
 
 UTEST(e2e, identical) {
     char buf[16384];
     arena a;
     create_arena(&a, buf, sizeof(buf));
-    HMODULE mod = NULL;
+    platform_lib mod = NULL;
     migrate_fn migrate = build_migration(&a, "fixtures/enemy_v1.h", "fixtures/enemy_v1.h",
                                          "identical", "enemy", &mod);
     ASSERT_TRUE(migrate != NULL);
@@ -217,5 +221,5 @@ UTEST(e2e, identical) {
         ASSERT_EQ(old_block[i].x, new_block[i].x);
         ASSERT_EQ(old_block[i].y, new_block[i].y);
     }
-    FreeLibrary(mod);
+    platform_unload_lib(mod);
 }

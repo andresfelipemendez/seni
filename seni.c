@@ -174,7 +174,12 @@ static void sb_appendf(strbuf* b, const char* fmt, ...) {
 generate_result generate_migration(arena* a, diff d) {
     generate_result r = {0};
     strbuf b = { a, NULL, NULL };
-    sb_appendf(&b, "#include <stddef.h>\n\n");
+    sb_appendf(&b, "#include <stddef.h>\n\n"
+                   "#if defined(_WIN32)\n"
+                   "#define SENI_EXPORT __declspec(dllexport)\n"
+                   "#else\n"
+                   "#define SENI_EXPORT\n"
+                   "#endif\n\n");
     for (size_t i = 0; i < d.struct_count; i++) {
         struct_diff* sd = &d.structs[i];
         if (sd->old_count > 0) {
@@ -188,7 +193,7 @@ generate_result generate_migration(arena* a, diff d) {
             sb_appendf(&b, "%s %s; ", type_name(sd->new_fields[j].type), sd->new_fields[j].name);
         sb_appendf(&b, "} %s_new;\n", sd->name);
 
-        sb_appendf(&b, "__declspec(dllexport) void migrate_%s(void* old_p, void* new_p, size_t count) {\n", sd->name);
+        sb_appendf(&b, "SENI_EXPORT void migrate_%s(void* old_p, void* new_p, size_t count) {\n", sd->name);
         if (sd->old_count > 0)
             sb_appendf(&b, "    %s_old* o = (%s_old*)old_p;\n", sd->name, sd->name);
         else
