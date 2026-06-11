@@ -274,6 +274,57 @@ UTEST(diff, bad_new_header) {
     ASSERT_STREQ("new_header error: unknown type 'long' at line 2", r.err);
 }
 
+UTEST(generate, add_field) {
+    char buf[16384];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* old_header =
+    "typedef struct {"
+        "float x, y;"
+    "} enemy;";
+    char* new_header =
+    "typedef struct {"
+        "float x, y;"
+        "int health;"
+    "} enemy;";
+    diff_result d = diff_structs(&a, old_header, new_header);
+    ASSERT_FALSE(d.err);
+    generate_result g = generate_migration(&a, d.value);
+    ASSERT_FALSE(g.err);
+    ASSERT_TRUE(g.code != NULL);
+    ASSERT_TRUE(strstr(g.code, "#include <stddef.h>") != NULL);
+    ASSERT_TRUE(strstr(g.code, "typedef struct { float x; float y; } enemy_old;") != NULL);
+    ASSERT_TRUE(strstr(g.code, "typedef struct { float x; float y; int health; } enemy_new;") != NULL);
+    ASSERT_TRUE(strstr(g.code, "__declspec(dllexport) void migrate_enemy(void* old_p, void* new_p, size_t count)") != NULL);
+    ASSERT_TRUE(strstr(g.code, "n[i].x = o[i].x;") != NULL);
+    ASSERT_TRUE(strstr(g.code, "n[i].y = o[i].y;") != NULL);
+    ASSERT_TRUE(strstr(g.code, "n[i].health = 0;") != NULL);
+}
+
+UTEST(generate, new_struct_no_old_typedef) {
+    char buf[16384];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    diff_result d = diff_structs(&a, "", "typedef struct {int score;} player;");
+    ASSERT_FALSE(d.err);
+    generate_result g = generate_migration(&a, d.value);
+    ASSERT_FALSE(g.err);
+    ASSERT_TRUE(strstr(g.code, "player_old") == NULL);
+    ASSERT_TRUE(strstr(g.code, "(void)old_p;") != NULL);
+    ASSERT_TRUE(strstr(g.code, "n[i].score = 0;") != NULL);
+}
+
+UTEST(generate, out_of_memory) {
+    char small[256];
+    arena a;
+    create_arena(&a, small, sizeof(small));
+    diff_result d = diff_structs(&a, "typedef struct {int x;} s;", "typedef struct {int x;} s;");
+    ASSERT_FALSE(d.err);
+    generate_result g = generate_migration(&a, d.value);
+    ASSERT_TRUE(g.err);
+    ASSERT_STREQ("out of memory", g.err);
+}
+
 /*
 UTEST(foo, bar) {
     char buf[4096];

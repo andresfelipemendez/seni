@@ -3,6 +3,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
 
 #define MAX_STRUCTS 64
 #define STR(x) #x
@@ -133,6 +134,79 @@ parse_result parse_header(arena* a, char* header) {
         }
     }
 
+    return r;
+}
+
+static const char* type_name(ast_type t) {
+    switch (t) {
+        case ast_int: return "int";
+        case ast_float: return "float";
+        case ast_char: return "char";
+        case ast_double: return "double";
+        default: return "void";
+    }
+}
+
+// arena-backed string builder: consecutive appends are contiguous because the
+// arena hands out sequential memory; each append backs off its own null
+// terminator so the next append overwrites it.
+typedef struct {
+    arena* a;
+    char* start;
+    char* err;
+} strbuf;
+
+static void sb_appendf(strbuf* b, const char* fmt, ...) {
+    if (b->err) return;
+    va_list args;
+    va_start(args, fmt);
+    int n = vsnprintf(NULL, 0, fmt, args);
+    va_end(args);
+    char* dst = allocate(b->a, (size_t)n + 1);
+    if (!dst) { b->err = "out of memory"; return; }
+    if (!b->start) b->start = dst;
+    va_start(args, fmt);
+    vsnprintf(dst, (size_t)n + 1, fmt, args);
+    va_end(args);
+    b->a->offset -= 1;
+}
+
+generate_result generate_migration(arena* a, diff d) {
+    generate_result r = {0};
+    strbuf b = { a, NULL, NULL };
+    sb_appendf(&b, "#include <stddef.h>\n\n");
+    for (size_t i = 0; i < d.struct_count; i++) {
+        struct_diff* sd = &d.structs[i];
+        if (sd->old_count > 0) {
+            sb_appendf(&b, "typedef struct { ");
+            for (size_t j = 0; j < sd->old_count; j++)
+                sb_appendf(&b, "%s %s; ", type_name(sd->old_fields[j].type), sd->old_fields[j].name);
+            sb_appendf(&b, "} %s_old;\n", sd->name);
+        }
+        sb_appendf(&b, "typedef struct { ");
+        for (size_t j = 0; j < sd->new_count; j++)
+            sb_appendf(&b, "%s %s; ", type_name(sd->new_fields[j].type), sd->new_fields[j].name);
+        sb_appendf(&b, "} %s_new;\n", sd->name);
+
+        sb_appendf(&b, "__declspec(dllexport) void migrate_%s(void* old_p, void* new_p, size_t count) {\n", sd->name);
+        if (sd->old_count > 0)
+            sb_appendf(&b, "    %s_old* o = (%s_old*)old_p;\n", sd->name, sd->name);
+        else
+            sb_appendf(&b, "    (void)old_p;\n");
+        sb_appendf(&b, "    %s_new* n = (%s_new*)new_p;\n", sd->name, sd->name);
+        sb_appendf(&b, "    for (size_t i = 0; i < count; i++) {\n");
+        for (size_t j = 0; j < sd->ops_count; j++) {
+            field_op* op = &sd->ops[j];
+            if (op->kind == field_op_copy)
+                sb_appendf(&b, "        n[i].%s = o[i].%s;\n", op->name, op->name);
+            else
+                sb_appendf(&b, "        n[i].%s = 0;\n", op->name);
+        }
+        sb_appendf(&b, "    }\n}\n\n");
+    }
+    if (b.err) { r.err = b.err; return r; }
+    allocate(a, 1); // claim the final null terminator so later allocations don't clobber it
+    r.code = b.start;
     return r;
 }
 

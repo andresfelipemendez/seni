@@ -64,6 +64,12 @@ typedef struct {
     char* err;  // NULL = success
 } diff_result;
 
+typedef struct {
+    char* code;
+    char* err;  // NULL = success
+} generate_result;
+
 parse_result parse_header(arena* a, char* header);
 diff_result diff_structs(arena* a, char* old_header, char* new_header);
+generate_result generate_migration(arena* a, diff d);
 #endif
