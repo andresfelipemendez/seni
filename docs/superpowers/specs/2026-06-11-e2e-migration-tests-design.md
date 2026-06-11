@@ -83,6 +83,10 @@ __declspec(dllexport) void migrate_enemy(void* old_p, void* new_p, size_t count)
 One `migrate_<name>` export per struct in the diff. Code is built as a string in
 the arena (`generate_result.code`).
 
+For a struct that exists only in the new header (`old_count == 0`), no
+`<name>_old` typedef is emitted — an empty struct is invalid C. Its migrate
+function ignores `old_p` and zero-fills the new array.
+
 ## 3. E2E harness (test_e2e.c)
 
 Separate utest executable; unit tests in test.c stay fast and untouched.
