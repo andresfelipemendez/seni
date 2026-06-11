@@ -5,14 +5,11 @@
 #include <stdio.h>
 #include <stdarg.h>
 
-#define MAX_STRUCTS 64
 #define MAX_NAME 64        /* bound on struct/field names: keeps every generated
                               line and error message far below the 1024-byte
                               format buffers */
 #define MAX_ARRAY 65536
 #define MAX_TOKEN_ECHO 64  /* longest input token echoed into an error message */
-#define STR(x) #x
-#define XSTR(x) STR(x)
 
 static int is_white_space(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
@@ -90,11 +87,35 @@ static char* strip_comments(arena* a, char* src, char** err_out) {
     return dst;
 }
 
+/* shared scan: counts structs, and when field_counts is non-NULL also tallies
+   field separators per struct. running it twice (count, allocate, fill) means
+   there is no fixed struct cap -- the arena is the only limit. */
+static size_t scan_structs(char* header, size_t* field_counts) {
+    size_t struct_count = 0;
+    int in_struct = 0;
+    int i;
+    const char* tag;
+    int tag_len;
+    for (i = 0; header[i] != '\0'; i++) {
+        int m = !in_struct ? match_struct_start(&header[i], &tag, &tag_len) : 0;
+        if (m) {
+            struct_count++;
+            in_struct = 1;
+            i += m - 1;
+        } else if (in_struct && (header[i] == ',' || header[i] == ';')) {
+            if (field_counts) field_counts[struct_count - 1]++;
+        } else if (in_struct && header[i] == '}') {
+            in_struct = 0;
+        }
+    }
+    return struct_count;
+}
+
 parse_result parse_header(arena* a, char* header) {
     parse_result r = {0};
-    size_t struct_count = 0;
-    size_t field_counts[MAX_STRUCTS] = {0};
-    int in_struct = 0;
+    size_t struct_count;
+    size_t* field_counts;
+    size_t fc;
     int i;
     parse_state state;
     size_t si;
@@ -110,24 +131,14 @@ parse_result parse_header(arena* a, char* header) {
     header = strip_comments(a, header, &strip_err);
     if (!header) { r.err = strip_err; return r; }
 
-    /* single pass: count structs and fields per struct */
-    for (i = 0; header[i] != '\0'; i++) {
-        int m = !in_struct ? match_struct_start(&header[i], &tag, &tag_len) : 0;
-        if (m) {
-            struct_count++;
-            if (struct_count > MAX_STRUCTS) { r.err = "more than " XSTR(MAX_STRUCTS) " structs, too many structs"; return r; }
-            in_struct = 1;
-            i += m - 1;
-        } else if (in_struct && (header[i] == ',' || header[i] == ';')) {
-            field_counts[struct_count - 1]++;
-        } else if (in_struct && header[i] == '}') {
-            in_struct = 0;
-        }
-    }
-
+    struct_count = scan_structs(header, NULL);
     if (struct_count == 0) {
         return r;
     }
+    field_counts = allocate(a, sizeof(size_t) * struct_count);
+    if (!field_counts) { r.err = "out of memory"; return r; }
+    for (fc = 0; fc < struct_count; fc++) field_counts[fc] = 0;
+    scan_structs(header, field_counts);
     r.value.struct_count = struct_count;
     r.value.structs = allocate(a, sizeof(ast_struct) * struct_count);
     if (!r.value.structs) { r.err = "out of memory"; return r; }

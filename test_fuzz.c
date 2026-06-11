@@ -39,7 +39,7 @@ static char fuzz_arena_buf[65536];
 static const char* ast_violation(parse_result* r) {
     size_t i, f;
     if (r->err) return NULL; /* error result is always acceptable */
-    if (r->value.struct_count > 64) return "struct_count > 64";
+    if (r->value.struct_count > 65536) return "struct_count implausibly large";
     if (r->value.struct_count > 0 && !r->value.structs) return "structs NULL with count > 0";
     for (i = 0; i < r->value.struct_count; i++) {
         ast_struct* s = &r->value.structs[i];

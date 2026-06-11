@@ -43,11 +43,13 @@ static platform_lib compile_and_load_st(const char* code, const char* name) {
 
 typedef void (*migrate_fn)(void* old_p, void* new_p, size_t count);
 
-/* ---- ceiling: 64 structs x 16 fields, all names at the 64-char cap ------ */
+/* ---- ceiling: 256 structs x 16 fields, all names at the 64-char cap ----- */
 
-static char big_h1[262144];
-static char big_h2[262144];
-static char big_arena[2 * 1024 * 1024];
+#define BIG_STRUCTS 256
+
+static char big_h1[524288];
+static char big_h2[524288];
+static char big_arena[8 * 1024 * 1024];
 
 static void cap_name(char* out, const char* prefix, unsigned long idx) {
     int n = sprintf(out, "%s%02lu_", prefix, idx);
@@ -59,7 +61,7 @@ static void emit_big(char* buf, int extra_field_per_struct) {
     int o = 0;
     unsigned long s, f;
     char name[65];
-    for (s = 0; s < 64; s++) {
+    for (s = 0; s < BIG_STRUCTS; s++) {
         cap_name(name, "s", s);
         o += sprintf(&buf[o], "typedef struct {\n");
         for (f = 0; f < 16; f++) {
@@ -87,11 +89,11 @@ UTEST(stress, max_structs_max_names) {
     create_arena(&a, big_arena, sizeof(big_arena));
     d = diff_structs(&a, big_h1, big_h2);
     ASSERT_FALSE(d.err);
-    ASSERT_EQ((size_t)64, d.value.struct_count);
-    ASSERT_EQ((size_t)17, d.value.structs[63].ops_count);
+    ASSERT_EQ((size_t)BIG_STRUCTS, d.value.struct_count);
+    ASSERT_EQ((size_t)17, d.value.structs[BIG_STRUCTS - 1].ops_count);
     g = generate_migration(&a, d.value);
     ASSERT_FALSE(g.err);
-    cap_name(want + 8, "s", 63);
+    cap_name(want + 8, "s", BIG_STRUCTS - 1);
     memcpy(want, "migrate_", 8);
     ASSERT_TRUE(strstr(g.code, want) != NULL);
     fprintf(stderr, "stress.max: header %lu bytes, generated %lu bytes, arena used %lu\n",

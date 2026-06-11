@@ -120,19 +120,22 @@ UTEST(parse, multiple_structs) {
     ASSERT_EQ(ast_float, r.value.structs[1].fields[3].type);
 }
 
-UTEST(parse, too_many_structs) {
-    char buf[4096];
+UTEST(parse, many_structs_no_cap) {
+    /* real engines have hundreds of structs; the only limit is the arena */
+    static char buf[131072];
+    static char header[32768];
     arena a;
     create_arena(&a, buf, sizeof(buf));
-    // build a header with 65 structs
-    char header[65 * 40];
     int offset = 0;
-    for (int i = 0; i < 65; i++) {
+    for (int i = 0; i < 500; i++) {
         offset += sprintf(&header[offset], "typedef struct {int x;} s%d;", i);
     }
     parse_result r = parse_header(&a, header);
-    ASSERT_TRUE(r.err);
-    ASSERT_STREQ("more than 64 structs, too many structs", r.err);
+    ASSERT_FALSE(r.err);
+    ASSERT_EQ((size_t)500, r.value.struct_count);
+    ASSERT_STREQ("s0", r.value.structs[0].name);
+    ASSERT_STREQ("s499", r.value.structs[499].name);
+    ASSERT_EQ((size_t)1, r.value.structs[499].fields_count);
 }
 
 UTEST(parse, missing_semicolon_after_name) {
