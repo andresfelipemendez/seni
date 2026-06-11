@@ -14,11 +14,11 @@ https://github.com/sheredom/utest.h
 
 ## header format
 
-the parser is deliberately small and matches `typedef struct {` literally:
-one space between the words, brace on the same line. comments inside struct
-bodies are not supported (anything between structs is ignored, so file-level
-comments are fine). struct and field names max 64 chars, array sizes max
-65536. keep migrated state in seni-clean headers.
+`typedef struct {` is matched with flexible whitespace (any spacing between
+the words, brace on its own line is fine). comments inside struct bodies are
+not supported (anything between structs is ignored, so file-level comments
+are fine). struct and field names max 64 chars, array sizes max 65536. keep
+migrated state in seni-clean headers.
 
 ## supported fields
 

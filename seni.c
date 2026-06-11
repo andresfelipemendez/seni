@@ -18,6 +18,23 @@ static int is_white_space(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
+/* matches 'typedef' ws+ 'struct' ws* '{' with any whitespace between tokens.
+   returns chars consumed (including the brace) or 0 on no match. shared by
+   the counting pass and the parse pass so they can never disagree. */
+static int match_struct_start(const char* s) {
+    int i;
+    if (strncmp(s, "typedef", 7) != 0) return 0;
+    i = 7;
+    if (!is_white_space(s[i])) return 0;
+    while (is_white_space(s[i])) i++;
+    if (strncmp(&s[i], "struct", 6) != 0) return 0;
+    i += 6;
+    if (!is_white_space(s[i]) && s[i] != '{') return 0;
+    while (is_white_space(s[i])) i++;
+    if (s[i] != '{') return 0;
+    return i + 1;
+}
+
 parse_result parse_header(arena* a, char* header) {
     parse_result r = {0};
     size_t struct_count = 0;
@@ -32,11 +49,12 @@ parse_result parse_header(arena* a, char* header) {
 
     /* single pass: count structs and fields per struct */
     for (i = 0; header[i] != '\0'; i++) {
-        if (strncmp(&header[i], "typedef struct {", 16) == 0) {
+        int m = !in_struct ? match_struct_start(&header[i]) : 0;
+        if (m) {
             struct_count++;
             if (struct_count > MAX_STRUCTS) { r.err = "more than " XSTR(MAX_STRUCTS) " structs, too many structs"; return r; }
             in_struct = 1;
-            i += 15;
+            i += m - 1;
         } else if (in_struct && (header[i] == ',' || header[i] == ';')) {
             field_counts[struct_count - 1]++;
         } else if (in_struct && header[i] == '}') {
@@ -59,18 +77,25 @@ parse_result parse_header(arena* a, char* header) {
     line = 1;
     for (i = 0; header[i] != '\0'; i++) {
         if (header[i] == '\n') line++;
-        if (state == PARSE_OUTSIDE && strncmp(&header[i], "typedef struct {", 16) == 0) {
-            state = PARSE_IN_STRUCT;
-            fi = 0;
-            if (field_counts[si] > 0) {
-                r.value.structs[si].fields = allocate(a, sizeof(ast_field) * field_counts[si]);
-                if (!r.value.structs[si].fields) { r.err = "out of memory"; return r; }
-            } else {
-                r.value.structs[si].fields = NULL; /* arena memory is not zeroed */
+        if (state == PARSE_OUTSIDE) {
+            int m = match_struct_start(&header[i]);
+            if (m) {
+                int k;
+                for (k = 1; k < m; k++) {
+                    if (header[i + k] == '\n') line++; /* matcher can span lines */
+                }
+                state = PARSE_IN_STRUCT;
+                fi = 0;
+                if (field_counts[si] > 0) {
+                    r.value.structs[si].fields = allocate(a, sizeof(ast_field) * field_counts[si]);
+                    if (!r.value.structs[si].fields) { r.err = "out of memory"; return r; }
+                } else {
+                    r.value.structs[si].fields = NULL; /* arena memory is not zeroed */
+                }
+                r.value.structs[si].fields_count = 0;
+                i += m - 1;
+                continue;
             }
-            r.value.structs[si].fields_count = 0;
-            i += 15;
-            continue;
         }
         if (state == PARSE_IN_STRUCT && is_white_space(header[i])) {
             continue;

@@ -336,6 +336,43 @@ UTEST(parse, unknown_type_followed_by_newline) {
     ASSERT_STREQ("unknown type 'long' at line 2", r.err);
 }
 
+/* 'typedef  struct {' with flexible whitespace must parse, not silently skip
+   the struct (silent skip = diff sees every field as removed = data loss) */
+UTEST(parse, flexible_struct_start_whitespace) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header =
+    "typedef  struct  {"
+        "int x;"
+    "} a_struct;"
+    "typedef struct{"
+        "int y;"
+    "} b_struct;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_FALSE(r.err);
+    ASSERT_EQ((size_t)2, r.value.struct_count);
+    ASSERT_STREQ("a_struct", r.value.structs[0].name);
+    ASSERT_STREQ("x", r.value.structs[0].fields[0].name);
+    ASSERT_STREQ("b_struct", r.value.structs[1].name);
+    ASSERT_STREQ("y", r.value.structs[1].fields[0].name);
+}
+
+UTEST(parse, brace_on_next_line) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header =
+    "typedef struct\n"
+    "{\n"
+        "long x;\n"
+    "} s;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_TRUE(r.err);
+    /* line 3: newlines inside the relaxed 'typedef struct {' match must count */
+    ASSERT_STREQ("unknown type 'long' at line 3", r.err);
+}
+
 UTEST(parse, array_field) {
     char buf[4096];
     arena a;
