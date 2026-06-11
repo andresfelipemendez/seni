@@ -286,6 +286,167 @@ UTEST(e2e, array_resize) {
     platform_unload_lib(mod);
 }
 
+static int write_file(const char* path, const char* content) {
+    FILE* f = fopen(path, "wb");
+    if (!f) { fprintf(stderr, "cannot write %s\n", path); return 1; }
+    fputs(content, f);
+    fclose(f);
+    return 0;
+}
+
+typedef void (*game_fn)(void* state, size_t count);
+
+/* full engine lifecycle: host owns the state memory, game code lives in a
+   dll that gets rebuilt and hot-reloaded after the struct layout changes.
+
+   1. working header build/game_current.h starts as game_v1.h
+   2. game dll v1 (embeds layout, has game_init/game_update) loads, ticks twice
+   3. the "save": game_current.h is OVERWRITTEN with the v2 layout --
+      from here the old layout exists only inside the loaded v1 dll
+   4. game dll v2 builds from the new header, with update logic that uses
+      the new fields (health, trail[2])
+   5. reload: old layout read from v1 dll's seni_layout symbol, new layout
+      from v2 dll's, diff -> generate -> compile migration dll -> migrate
+      host state into a new block, unload v1
+   6. v2's game_update ticks the MIGRATED memory; correct values coming out
+      of v2's view of the block is the layout proof */
+UTEST(e2e, full_hot_reload) {
+    char buf[16384];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+
+    /* host's view of the two layouts */
+    typedef struct { float x, y; float speed; } host_enemy_v1;
+    typedef struct { float x, y; float speed; int health; float trail[2]; } host_enemy_v2;
+
+    static const char* game_v1_src =
+        "#include <stddef.h>\n"
+        "#include \"game_current.h\"\n"
+        "#include \"../seni_embed.h\"\n"
+        "SENI_EMBED_LAYOUT(\"build/game_current.h\");\n"
+        "#if defined(_WIN32)\n"
+        "#define GEXPORT __declspec(dllexport)\n"
+        "#else\n"
+        "#define GEXPORT\n"
+        "#endif\n"
+        "GEXPORT void game_init(void* state, size_t count) {\n"
+        "    enemy* e = (enemy*)state;\n"
+        "    size_t i;\n"
+        "    for (i = 0; i < count; i++) {\n"
+        "        e[i].x = (float)(i * 10);\n"
+        "        e[i].y = 0.0f;\n"
+        "        e[i].speed = (float)(1 + i);\n"
+        "    }\n"
+        "}\n"
+        "GEXPORT void game_update(void* state, size_t count) {\n"
+        "    enemy* e = (enemy*)state;\n"
+        "    size_t i;\n"
+        "    for (i = 0; i < count; i++) { e[i].x += e[i].speed; e[i].y += 1.0f; }\n"
+        "}\n";
+
+    static const char* game_v2_src =
+        "#include <stddef.h>\n"
+        "#include \"game_current.h\"\n"
+        "#include \"../seni_embed.h\"\n"
+        "SENI_EMBED_LAYOUT(\"build/game_current.h\");\n"
+        "#if defined(_WIN32)\n"
+        "#define GEXPORT __declspec(dllexport)\n"
+        "#else\n"
+        "#define GEXPORT\n"
+        "#endif\n"
+        "GEXPORT void game_update(void* state, size_t count) {\n"
+        "    enemy* e = (enemy*)state;\n"
+        "    size_t i;\n"
+        "    for (i = 0; i < count; i++) {\n"
+        "        e[i].x += e[i].speed;\n"
+        "        e[i].y += 1.0f;\n"
+        "        e[i].health += 1;\n"
+        "        e[i].trail[0] = e[i].x;\n"
+        "        e[i].trail[1] = e[i].y;\n"
+        "    }\n"
+        "}\n";
+
+    /* 1. working header starts at v1 */
+    char* v1_header = read_file(&a, "fixtures/game_v1.h");
+    ASSERT_TRUE(v1_header != NULL);
+    platform_make_dir("build");
+    ASSERT_EQ(0, write_file("build/game_current.h", v1_header));
+
+    /* 2. build + load game v1, init, tick twice */
+    platform_lib game_v1 = compile_and_load(game_v1_src, "hotgame_v1");
+    ASSERT_TRUE(game_v1 != NULL);
+    game_fn init_v1 = (game_fn)platform_get_symbol(game_v1, "game_init");
+    game_fn update_v1 = (game_fn)platform_get_symbol(game_v1, "game_update");
+    ASSERT_TRUE(init_v1 != NULL);
+    ASSERT_TRUE(update_v1 != NULL);
+
+    host_enemy_v1 state_v1[3];
+    init_v1(state_v1, 3);
+    update_v1(state_v1, 3);
+    update_v1(state_v1, 3);
+    /* after 2 ticks: x = 10*i + 2*(1+i), y = 2 */
+    for (int i = 0; i < 3; i++) {
+        ASSERT_EQ((float)(10 * i + 2 * (1 + i)), state_v1[i].x);
+        ASSERT_EQ(2.0f, state_v1[i].y);
+    }
+
+    /* 3. the save: overwrite the working header with the v2 layout.
+       old layout is now ONLY inside the loaded v1 dll. */
+    char* v2_header = read_file(&a, "fixtures/game_v2.h");
+    ASSERT_TRUE(v2_header != NULL);
+    ASSERT_EQ(0, write_file("build/game_current.h", v2_header));
+
+    /* 4. rebuild: game dll v2 embeds the new layout */
+    platform_lib game_v2 = compile_and_load(game_v2_src, "hotgame_v2");
+    ASSERT_TRUE(game_v2 != NULL);
+    game_fn update_v2 = (game_fn)platform_get_symbol(game_v2, "game_update");
+    ASSERT_TRUE(update_v2 != NULL);
+
+    /* 5. reload: diff the layouts the two dlls were actually built with */
+    const char** old_layout_p = (const char**)platform_get_symbol(game_v1, "seni_layout");
+    const char** new_layout_p = (const char**)platform_get_symbol(game_v2, "seni_layout");
+    ASSERT_TRUE(old_layout_p != NULL);
+    ASSERT_TRUE(new_layout_p != NULL);
+
+    diff_result d = diff_structs(&a, (char*)*old_layout_p, (char*)*new_layout_p);
+    ASSERT_FALSE(d.err);
+    generate_result g = generate_migration(&a, d.value);
+    ASSERT_FALSE(g.err);
+    platform_lib migration = compile_and_load(g.code, "hotgame_migration");
+    ASSERT_TRUE(migration != NULL);
+    migrate_fn migrate = (migrate_fn)platform_get_symbol(migration, "migrate_enemy");
+    ASSERT_TRUE(migrate != NULL);
+
+    host_enemy_v2 state_v2[3];
+    memset(state_v2, 0xCD, sizeof(state_v2));
+    migrate(state_v1, state_v2, 3);
+    platform_unload_lib(game_v1); /* old game code gone, state survived */
+
+    /* migrated: x/y/speed carried over, health zeroed, trail zeroed */
+    for (int i = 0; i < 3; i++) {
+        ASSERT_EQ((float)(10 * i + 2 * (1 + i)), state_v2[i].x);
+        ASSERT_EQ(2.0f, state_v2[i].y);
+        ASSERT_EQ((float)(1 + i), state_v2[i].speed);
+        ASSERT_EQ(0, state_v2[i].health);
+        ASSERT_EQ(0.0f, state_v2[i].trail[0]);
+        ASSERT_EQ(0.0f, state_v2[i].trail[1]);
+    }
+
+    /* 6. v2 game code ticks the migrated memory */
+    update_v2(state_v2, 3);
+    for (int i = 0; i < 3; i++) {
+        float expect_x = (float)(10 * i + 3 * (1 + i));
+        ASSERT_EQ(expect_x, state_v2[i].x);
+        ASSERT_EQ(3.0f, state_v2[i].y);
+        ASSERT_EQ(1, state_v2[i].health);
+        ASSERT_EQ(expect_x, state_v2[i].trail[0]);
+        ASSERT_EQ(3.0f, state_v2[i].trail[1]);
+    }
+
+    platform_unload_lib(migration);
+    platform_unload_lib(game_v2);
+}
+
 UTEST(e2e, identical) {
     char buf[16384];
     arena a;
