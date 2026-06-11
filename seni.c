@@ -178,6 +178,7 @@ parse_result parse_header(arena* a, char* header) {
                 i++;
             }
             len = i - start;
+            while (len > 0 && is_white_space(header[start + len - 1])) len--;
             if (len == 0 && cur_tag_len > 0) {
                 /* tag-style 'struct foo { ... };' -- the tag is the name */
                 start = (int)(cur_tag - header);
@@ -193,6 +194,17 @@ parse_result parse_header(arena* a, char* header) {
                 r.err = msg ? msg : "struct name too long";
                 return r;
             }
+            {
+                int k;
+                for (k = 0; k < len; k++) {
+                    if (!is_ident(header[start + k])) {
+                        int echo = len > MAX_TOKEN_ECHO ? MAX_TOKEN_ECHO : len;
+                        char* msg = arena_sprintf(a, "invalid struct name '%.*s' at line %d", echo, &header[start], line);
+                        r.err = msg ? msg : "invalid struct name";
+                        return r;
+                    }
+                }
+            }
             r.value.structs[si].name = arena_copy_string(a, &header[start], len);
             if (!r.value.structs[si].name) { r.err = "out of memory"; return r; }
             r.value.structs[si].fields_count = fi;
@@ -201,18 +213,29 @@ parse_result parse_header(arena* a, char* header) {
             if (header[i] == '\0') break;
             continue;
         } else if (state == PARSE_IN_STRUCT) {
-            if (strncmp(&header[i], "float ", 6) == 0) {
+            /* keyword + any whitespace after it. i stays on the last keyword
+               char and we continue, so the loop top sees (and line-counts)
+               the whitespace, then READ_FIELD_NAME skips it. */
+            if (strncmp(&header[i], "float", 5) == 0 && is_white_space(header[i + 5])) {
                 cur_type = ast_float;
-                i += 5;
-            } else if (strncmp(&header[i], "int ", 4) == 0) {
-                cur_type = ast_int;
-                i += 3;
-            } else if (strncmp(&header[i], "char ", 5) == 0) {
-                cur_type = ast_char;
                 i += 4;
-            } else if (strncmp(&header[i], "double ", 7) == 0) {
+                state = PARSE_READ_FIELD_NAME;
+                continue;
+            } else if (strncmp(&header[i], "int", 3) == 0 && is_white_space(header[i + 3])) {
+                cur_type = ast_int;
+                i += 2;
+                state = PARSE_READ_FIELD_NAME;
+                continue;
+            } else if (strncmp(&header[i], "char", 4) == 0 && is_white_space(header[i + 4])) {
+                cur_type = ast_char;
+                i += 3;
+                state = PARSE_READ_FIELD_NAME;
+                continue;
+            } else if (strncmp(&header[i], "double", 6) == 0 && is_white_space(header[i + 6])) {
                 cur_type = ast_double;
-                i += 6;
+                i += 5;
+                state = PARSE_READ_FIELD_NAME;
+                continue;
             } else {
                 int start = i;
                 int len;
@@ -233,7 +256,6 @@ parse_result parse_header(arena* a, char* header) {
                 r.err = msg ? msg : "unknown type";
                 return r;
             }
-            state = PARSE_READ_FIELD_NAME;
         }
         if (state == PARSE_READ_FIELD_NAME && is_white_space(header[i])) {
             continue;
@@ -293,6 +315,17 @@ parse_result parse_header(arena* a, char* header) {
                 r.err = msg ? msg : "field name too long";
                 return r;
             }
+            for (k = 0; k < len; k++) {
+                if (!is_ident(header[start + k])) {
+                    char* msg = arena_sprintf(a, "invalid field name '%.*s' at line %d", len, &header[start], line);
+                    r.err = msg ? msg : "invalid field name";
+                    return r;
+                }
+            }
+            if (fi >= field_counts[si]) {
+                r.err = "internal error: field count mismatch";
+                return r;
+            }
             r.value.structs[si].fields[fi].name = arena_copy_string(a, &header[start], len);
             if (!r.value.structs[si].fields[fi].name) { r.err = "out of memory"; return r; }
             r.value.structs[si].fields[fi].type = cur_type;
@@ -305,6 +338,16 @@ parse_result parse_header(arena* a, char* header) {
             }
         }
     }
+
+    if (state != PARSE_OUTSIDE) {
+        char* msg = arena_sprintf(a, "unexpected end of input at line %d", line);
+        r.err = msg ? msg : "unexpected end of input";
+        return r;
+    }
+    /* counting pass can over-count (e.g. struct keyword inside a region the
+       parse pass consumed differently); never report structs that were not
+       actually parsed */
+    if (si < r.value.struct_count) r.value.struct_count = si;
 
     return r;
 }

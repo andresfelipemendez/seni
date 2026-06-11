@@ -6,3 +6,7 @@ gcc test.c -o test.out
 ./test.out
 gcc test_e2e.c -o test_e2e.out
 ./test_e2e.out
+# fuzz under the sanitizers; no mallocs of our own, leak detection just
+# flags dlopen internals
+gcc -fsanitize=address,undefined -g test_fuzz.c -o test_fuzz.out
+ASAN_OPTIONS=detect_leaks=0 ./test_fuzz.out

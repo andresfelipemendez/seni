@@ -467,6 +467,57 @@ UTEST(parse, mid_declaration_comment) {
     ASSERT_STREQ("x", r.value.structs[0].fields[0].name);
 }
 
+/* fuzz-derived: type keyword only matched with a single trailing space */
+UTEST(parse, tab_or_newline_after_type) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header = "typedef struct {int\tx;float\ny;} s;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_FALSE(r.err);
+    ASSERT_EQ((size_t)2, r.value.structs[0].fields_count);
+    ASSERT_STREQ("x", r.value.structs[0].fields[0].name);
+    ASSERT_EQ(ast_int, r.value.structs[0].fields[0].type);
+    ASSERT_STREQ("y", r.value.structs[0].fields[1].name);
+    ASSERT_EQ(ast_float, r.value.structs[0].fields[1].type);
+}
+
+/* fuzz-derived: 'typedef struct {' inside a struct-name region made the
+   counting pass and parse pass diverge -> field_counts slots misaligned ->
+   arena overflow writing fields. must die at name validation instead. */
+UTEST(parse, struct_keyword_inside_name_region) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header =
+    "typedef struct {int x;} typedef struct {int y;} b; "
+    "typedef struct {int p, q, r;} c;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_TRUE(r.err);
+    ASSERT_TRUE(strstr(r.err, "invalid struct name") != NULL);
+}
+
+UTEST(parse, invalid_field_name_chars) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header = "typedef struct {int a+b;} s;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_TRUE(r.err);
+    ASSERT_STREQ("invalid field name 'a+b' at line 1", r.err);
+}
+
+/* fuzz-derived: struct open at EOF was silently half-parsed */
+UTEST(parse, unclosed_struct) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header = "typedef struct {int x;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_TRUE(r.err);
+    ASSERT_STREQ("unexpected end of input at line 1", r.err);
+}
+
 UTEST(parse, array_field) {
     char buf[4096];
     arena a;

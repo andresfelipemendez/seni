@@ -4,4 +4,6 @@ gcc -std=c89 -pedantic -Wall -Werror -fsyntax-only seni.c arena.c platform_windo
 gcc test.c -o test.exe || exit /b 1
 .\test.exe || exit /b 1
 gcc test_e2e.c -o test_e2e.exe || exit /b 1
-.\test_e2e.exe
+.\test_e2e.exe || exit /b 1
+gcc test_fuzz.c -o test_fuzz.exe || exit /b 1
+.\test_fuzz.exe
