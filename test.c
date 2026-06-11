@@ -373,6 +373,100 @@ UTEST(parse, brace_on_next_line) {
     ASSERT_STREQ("unknown type 'long' at line 3", r.err);
 }
 
+UTEST(parse, tag_style_struct) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header =
+    "struct enemy {\n"
+        "float x, y;\n"
+    "};";
+    parse_result r = parse_header(&a, header);
+    ASSERT_FALSE(r.err);
+    ASSERT_EQ((size_t)1, r.value.struct_count);
+    ASSERT_STREQ("enemy", r.value.structs[0].name);
+    ASSERT_EQ((size_t)2, r.value.structs[0].fields_count);
+}
+
+UTEST(parse, typedef_name_wins_over_tag) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header = "typedef struct enemy_t {int x;} enemy;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_FALSE(r.err);
+    ASSERT_STREQ("enemy", r.value.structs[0].name);
+}
+
+UTEST(parse, comments_in_struct) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header =
+    "typedef struct {\n"
+        "/* world position */\n"
+        "float x, y;\n"
+        "int s; /* int fake; */\n"
+    "} e;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_FALSE(r.err);
+    ASSERT_EQ((size_t)3, r.value.structs[0].fields_count);
+    ASSERT_STREQ("x", r.value.structs[0].fields[0].name);
+    ASSERT_STREQ("s", r.value.structs[0].fields[2].name);
+}
+
+UTEST(parse, comment_decoy_outside_struct) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header =
+    "/* typedef struct { int ghost; } g; */\n"
+    "typedef struct {int x;} real;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_FALSE(r.err);
+    ASSERT_EQ((size_t)1, r.value.struct_count);
+    ASSERT_STREQ("real", r.value.structs[0].name);
+}
+
+UTEST(parse, line_comment) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header =
+    "typedef struct {\n"
+        "int hp; // health, int fake;\n"
+        "float speed;\n"
+    "} e;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_FALSE(r.err);
+    ASSERT_EQ((size_t)2, r.value.structs[0].fields_count);
+    ASSERT_STREQ("speed", r.value.structs[0].fields[1].name);
+}
+
+UTEST(parse, unterminated_comment) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header =
+    "typedef struct {\n"
+        "/* oops\n"
+        "int x;\n"
+    "} s;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_TRUE(r.err);
+    ASSERT_STREQ("unterminated comment at line 2", r.err);
+}
+
+UTEST(parse, mid_declaration_comment) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header = "typedef struct {int /* c */ x /* hp */;} s;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_FALSE(r.err);
+    ASSERT_STREQ("x", r.value.structs[0].fields[0].name);
+}
+
 UTEST(parse, array_field) {
     char buf[4096];
     arena a;

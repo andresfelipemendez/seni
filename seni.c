@@ -18,21 +18,76 @@ static int is_white_space(char c) {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
-/* matches 'typedef' ws+ 'struct' ws* '{' with any whitespace between tokens.
-   returns chars consumed (including the brace) or 0 on no match. shared by
-   the counting pass and the parse pass so they can never disagree. */
-static int match_struct_start(const char* s) {
-    int i;
-    if (strncmp(s, "typedef", 7) != 0) return 0;
-    i = 7;
-    if (!is_white_space(s[i])) return 0;
-    while (is_white_space(s[i])) i++;
+static int is_ident(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+/* matches ['typedef' ws+] 'struct' [ws+ tag] ws* '{' -- both the typedef
+   and the tag-style declaration forms. returns chars consumed (including
+   the brace) or 0 on no match; tag span returned via tag/tag_len when the
+   declaration names the struct before the brace. shared by the counting
+   pass and the parse pass so they can never disagree. */
+static int match_struct_start(const char* s, const char** tag, int* tag_len) {
+    int i = 0;
+    *tag = NULL;
+    *tag_len = 0;
+    if (strncmp(s, "typedef", 7) == 0 && is_white_space(s[7])) {
+        i = 7;
+        while (is_white_space(s[i])) i++;
+    }
     if (strncmp(&s[i], "struct", 6) != 0) return 0;
     i += 6;
     if (!is_white_space(s[i]) && s[i] != '{') return 0;
     while (is_white_space(s[i])) i++;
+    if (is_ident(s[i])) {
+        *tag = &s[i];
+        while (is_ident(s[i])) { (*tag_len)++; i++; }
+        while (is_white_space(s[i])) i++;
+    }
     if (s[i] != '{') return 0;
     return i + 1;
+}
+
+/* replaces comments with whitespace before parsing, so the state machine and
+   the field counting pass never see them. block comments become one space
+   (newlines inside are kept so error line numbers stay accurate); line
+   comments vanish up to their newline. returns the cleaned copy, or NULL
+   with *err_out set. */
+static char* strip_comments(arena* a, char* src, char** err_out) {
+    size_t len = strlen(src);
+    char* dst = allocate_bytes(a, len + 1);
+    size_t i = 0;
+    size_t o = 0;
+    int line = 1;
+    *err_out = NULL;
+    if (!dst) { *err_out = "out of memory"; return NULL; }
+    while (src[i] != '\0') {
+        if (src[i] == '/' && src[i + 1] == '*') {
+            int cline = line;
+            i += 2;
+            while (src[i] != '\0' && !(src[i] == '*' && src[i + 1] == '/')) {
+                if (src[i] == '\n') { line++; dst[o++] = '\n'; }
+                i++;
+            }
+            if (src[i] == '\0') {
+                char* msg = arena_sprintf(a, "unterminated comment at line %d", cline);
+                *err_out = msg ? msg : "unterminated comment";
+                return NULL;
+            }
+            i += 2;
+            dst[o++] = ' '; /* a comment between two tokens must keep them apart */
+            continue;
+        }
+        if (src[i] == '/' && src[i + 1] == '/') {
+            while (src[i] != '\0' && src[i] != '\n') i++;
+            continue; /* the newline itself is copied next iteration */
+        }
+        if (src[i] == '\n') line++;
+        dst[o++] = src[i++];
+    }
+    dst[o] = '\0';
+    return dst;
 }
 
 parse_result parse_header(arena* a, char* header) {
@@ -46,10 +101,18 @@ parse_result parse_header(arena* a, char* header) {
     size_t fi;
     ast_type cur_type;
     int line;
+    const char* tag;
+    int tag_len;
+    const char* cur_tag = NULL;
+    int cur_tag_len = 0;
+    char* strip_err;
+
+    header = strip_comments(a, header, &strip_err);
+    if (!header) { r.err = strip_err; return r; }
 
     /* single pass: count structs and fields per struct */
     for (i = 0; header[i] != '\0'; i++) {
-        int m = !in_struct ? match_struct_start(&header[i]) : 0;
+        int m = !in_struct ? match_struct_start(&header[i], &tag, &tag_len) : 0;
         if (m) {
             struct_count++;
             if (struct_count > MAX_STRUCTS) { r.err = "more than " XSTR(MAX_STRUCTS) " structs, too many structs"; return r; }
@@ -78,9 +141,11 @@ parse_result parse_header(arena* a, char* header) {
     for (i = 0; header[i] != '\0'; i++) {
         if (header[i] == '\n') line++;
         if (state == PARSE_OUTSIDE) {
-            int m = match_struct_start(&header[i]);
+            int m = match_struct_start(&header[i], &tag, &tag_len);
             if (m) {
                 int k;
+                cur_tag = tag;
+                cur_tag_len = tag_len;
                 for (k = 1; k < m; k++) {
                     if (header[i + k] == '\n') line++; /* matcher can span lines */
                 }
@@ -113,6 +178,11 @@ parse_result parse_header(arena* a, char* header) {
                 i++;
             }
             len = i - start;
+            if (len == 0 && cur_tag_len > 0) {
+                /* tag-style 'struct foo { ... };' -- the tag is the name */
+                start = (int)(cur_tag - header);
+                len = cur_tag_len;
+            }
             if (len == 0) {
                 char* msg = arena_sprintf(a, "struct missing name at line %d", line);
                 r.err = msg ? msg : "struct missing name";
