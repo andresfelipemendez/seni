@@ -188,6 +188,123 @@ UTEST(parse, line_count_after_closing_brace) {
     ASSERT_STREQ("struct missing name at line 4", r.err);
 }
 
+/* --- review findings: red until fixed --- */
+
+/* finding: allocate() does no alignment; a 1-byte string copy then a struct
+   allocation hands back a misaligned pointer (UB on strict-alignment targets) */
+UTEST(arena, struct_allocations_are_aligned) {
+    double storage[64]; /* force 8-aligned base */
+    arena a;
+    create_arena(&a, storage, sizeof(storage));
+    allocate(&a, 1); /* odd offset */
+    void* p = allocate(&a, sizeof(double));
+    ASSERT_TRUE(p != NULL);
+    ASSERT_EQ((size_t)0, ((size_t)(char*)p) % 8);
+}
+
+/* finding: offset + s overflows for huge s, bounds check passes, wild pointer out */
+UTEST(arena, allocate_overflow_returns_null) {
+    char buf[64];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    allocate(&a, 10);
+    ASSERT_TRUE(allocate(&a, (size_t)-1) == NULL);
+}
+
+/* finding: zero-field struct leaves fields pointer uninitialized arena garbage */
+UTEST(parse, zero_field_struct_has_null_fields) {
+    char buf[4096];
+    arena a;
+    memset(buf, 0xAB, sizeof(buf)); /* make stale memory unmistakable */
+    create_arena(&a, buf, sizeof(buf));
+    char* header =
+    "typedef struct {"
+    "} empty;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_FALSE(r.err);
+    ASSERT_TRUE(r.value.structs[0].fields == NULL);
+}
+
+/* finding: unbounded names flow into vsprintf(tmp[1024]) during codegen and
+   error formatting -> stack smash. parser must cap name length. */
+UTEST(parse, field_name_too_long) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char header[4096];
+    char longname[201];
+    memset(longname, 'a', 200);
+    longname[200] = '\0';
+    sprintf(header, "typedef struct {int %s;} s;", longname);
+    parse_result r = parse_header(&a, header);
+    ASSERT_TRUE(r.err);
+    ASSERT_STREQ("field name too long (200 chars, max 64) at line 1", r.err);
+}
+
+UTEST(parse, struct_name_too_long) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char header[4096];
+    char longname[201];
+    memset(longname, 'b', 200);
+    longname[200] = '\0';
+    sprintf(header, "typedef struct {int x;} %s;", longname);
+    parse_result r = parse_header(&a, header);
+    ASSERT_TRUE(r.err);
+    ASSERT_STREQ("struct name too long (200 chars, max 64) at line 1", r.err);
+}
+
+/* finding: unknown-type token echoed unbounded into the error message */
+UTEST(parse, long_unknown_type_token_truncated) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char header[4096];
+    char longtype[301];
+    memset(longtype, 't', 300);
+    longtype[300] = '\0';
+    sprintf(header, "typedef struct {%s x;} s;", longtype);
+    parse_result r = parse_header(&a, header);
+    ASSERT_TRUE(r.err);
+    ASSERT_TRUE(strlen(r.err) < 150); /* token must be truncated, not echoed whole */
+}
+
+/* finding: 'float x, ;' silently produces a field with an empty name */
+UTEST(parse, empty_field_name) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header = "typedef struct {float x, ;} s;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_TRUE(r.err);
+    ASSERT_STREQ("empty field name at line 1", r.err);
+}
+
+/* finding: array size digits accumulate unchecked into size_t and wrap */
+UTEST(parse, array_size_too_large) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* header = "typedef struct {int x[18446744073709551617];} s;";
+    parse_result r = parse_header(&a, header);
+    ASSERT_TRUE(r.err);
+    ASSERT_STREQ("invalid array size for field 'x[18446744073709551617]' at line 1", r.err);
+}
+
+/* finding: diff matches by name only; int -> float 'migrates' via silent
+   implicit conversion. type change must be a hard error, never a convert. */
+UTEST(diff, type_change_rejected) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* old_header = "typedef struct {int health;} enemy;";
+    char* new_header = "typedef struct {float health;} enemy;";
+    diff_result r = diff_structs(&a, old_header, new_header);
+    ASSERT_TRUE(r.err);
+    ASSERT_STREQ("field 'health' in struct 'enemy' changed type from int to float, cannot migrate", r.err);
+}
+
 UTEST(parse, array_field) {
     char buf[4096];
     arena a;

@@ -6,6 +6,11 @@
 #include <stdarg.h>
 
 #define MAX_STRUCTS 64
+#define MAX_NAME 64        /* bound on struct/field names: keeps every generated
+                              line and error message far below the 1024-byte
+                              format buffers */
+#define MAX_ARRAY 65536
+#define MAX_TOKEN_ECHO 64  /* longest input token echoed into an error message */
 #define STR(x) #x
 #define XSTR(x) STR(x)
 
@@ -60,6 +65,8 @@ parse_result parse_header(arena* a, char* header) {
             if (field_counts[si] > 0) {
                 r.value.structs[si].fields = allocate(a, sizeof(ast_field) * field_counts[si]);
                 if (!r.value.structs[si].fields) { r.err = "out of memory"; return r; }
+            } else {
+                r.value.structs[si].fields = NULL; /* arena memory is not zeroed */
             }
             r.value.structs[si].fields_count = 0;
             i += 15;
@@ -86,6 +93,11 @@ parse_result parse_header(arena* a, char* header) {
                 r.err = msg ? msg : "struct missing name";
                 return r;
             }
+            if (len > MAX_NAME) {
+                char* msg = arena_sprintf(a, "struct name too long (%d chars, max %d) at line %d", len, MAX_NAME, line);
+                r.err = msg ? msg : "struct name too long";
+                return r;
+            }
             r.value.structs[si].name = arena_copy_string(a, &header[start], len);
             if (!r.value.structs[si].name) { r.err = "out of memory"; return r; }
             r.value.structs[si].fields_count = fi;
@@ -109,18 +121,20 @@ parse_result parse_header(arena* a, char* header) {
             } else {
                 int start = i;
                 int len;
+                int echo;
                 int k;
                 char* msg;
                 while (header[i] != ' ' && header[i] != '\0') i++;
                 len = i - start;
+                echo = len > MAX_TOKEN_ECHO ? MAX_TOKEN_ECHO : len;
                 for (k = 0; k < len; k++) {
                     if (header[start + k] == '*') {
-                        msg = arena_sprintf(a, "pointer type '%.*s' at line %d, pointers are not supported, use an index or handle", len, &header[start], line);
+                        msg = arena_sprintf(a, "pointer type '%.*s' at line %d, pointers are not supported, use an index or handle", echo, &header[start], line);
                         r.err = msg ? msg : "pointer type not supported";
                         return r;
                     }
                 }
-                msg = arena_sprintf(a, "unknown type '%.*s' at line %d", len, &header[start], line);
+                msg = arena_sprintf(a, "unknown type '%.*s' at line %d", echo, &header[start], line);
                 r.err = msg ? msg : "unknown type";
                 return r;
             }
@@ -145,7 +159,8 @@ parse_result parse_header(arena* a, char* header) {
             while (len > 0 && is_white_space(header[start + len - 1])) len--;
             for (k = 0; k < len; k++) {
                 if (header[start + k] == '*') {
-                    char* msg = arena_sprintf(a, "pointer field '%.*s' at line %d, pointers are not supported, use an index or handle", len, &header[start], line);
+                    int echo = len > MAX_TOKEN_ECHO ? MAX_TOKEN_ECHO : len;
+                    char* msg = arena_sprintf(a, "pointer field '%.*s' at line %d, pointers are not supported, use an index or handle", echo, &header[start], line);
                     r.err = msg ? msg : "pointer field not supported";
                     return r;
                 }
@@ -155,19 +170,32 @@ parse_result parse_header(arena* a, char* header) {
                 int p = k + 1;
                 int digits = 0;
                 size_t v = 0;
+                int overflow = 0;
                 while (p < len && header[start + p] >= '0' && header[start + p] <= '9') {
-                    v = v * 10 + (size_t)(header[start + p] - '0');
+                    if (v > MAX_ARRAY) overflow = 1; /* stop caring about exact value, just flag */
+                    else v = v * 10 + (size_t)(header[start + p] - '0');
                     digits++;
                     p++;
                 }
-                if (digits == 0 || v == 0 || p >= len || header[start + p] != ']') {
-                    char* msg = arena_sprintf(a, "invalid array size for field '%.*s' at line %d", len, &header[start], line);
+                if (digits == 0 || v == 0 || overflow || v > MAX_ARRAY || p >= len || header[start + p] != ']') {
+                    int echo = len > MAX_TOKEN_ECHO ? MAX_TOKEN_ECHO : len;
+                    char* msg = arena_sprintf(a, "invalid array size for field '%.*s' at line %d", echo, &header[start], line);
                     r.err = msg ? msg : "invalid array size";
                     return r;
                 }
                 arr_size = v;
                 len = k;
                 while (len > 0 && is_white_space(header[start + len - 1])) len--;
+            }
+            if (len == 0) {
+                char* msg = arena_sprintf(a, "empty field name at line %d", line);
+                r.err = msg ? msg : "empty field name";
+                return r;
+            }
+            if (len > MAX_NAME) {
+                char* msg = arena_sprintf(a, "field name too long (%d chars, max %d) at line %d", len, MAX_NAME, line);
+                r.err = msg ? msg : "field name too long";
+                return r;
             }
             r.value.structs[si].fields[fi].name = arena_copy_string(a, &header[start], len);
             if (!r.value.structs[si].fields[fi].name) { r.err = "out of memory"; return r; }
@@ -215,7 +243,7 @@ static void sb_appendf(strbuf* b, const char* fmt, ...) {
     n = vsprintf(tmp, fmt, args);
     va_end(args);
     if (n < 0) { b->err = "format error"; return; }
-    dst = allocate(b->a, (size_t)n + 1);
+    dst = allocate_bytes(b->a, (size_t)n + 1); /* unaligned: must stay contiguous with previous append */
     if (!dst) { b->err = "out of memory"; return; }
     if (!b->start) b->start = dst;
     memcpy(dst, tmp, (size_t)n + 1);
@@ -367,6 +395,13 @@ diff_result diff_structs(arena* a, char *old_header, char *new_header){
             op->new_array_size = ns->fields[f].array_size;
             for (g = 0; os && g < os->fields_count; g++) {
                 if (strcmp(os->fields[g].name, ns->fields[f].name) == 0) {
+                    if (os->fields[g].type != ns->fields[f].type) {
+                        char* msg = arena_sprintf(a, "field '%s' in struct '%s' changed type from %s to %s, cannot migrate",
+                                                  ns->fields[f].name, ns->name,
+                                                  type_name(os->fields[g].type), type_name(ns->fields[f].type));
+                        res.err = msg ? msg : "field changed type, cannot migrate";
+                        return res;
+                    }
                     op->kind = field_op_copy;
                     op->old_array_size = os->fields[g].array_size;
                     break;
