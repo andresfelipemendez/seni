@@ -27,8 +27,24 @@ typedef struct {
     size_t struct_count;
 } ast;
 
-typedef struct {
+typedef enum { field_op_copy, field_op_zero } field_op_kind;
 
+typedef struct {
+    field_op_kind kind;
+    char* name;        // field name in new struct
+    ast_type type;     // type in new struct
+} field_op;
+
+typedef struct {
+    char* name;                                 // struct name
+    ast_field* old_fields; size_t old_count;    // for emitting old typedef
+    ast_field* new_fields; size_t new_count;    // for emitting new typedef
+    field_op* ops;         size_t ops_count;    // one per new field, in new order
+} struct_diff;
+
+typedef struct {
+    struct_diff* structs;
+    size_t struct_count;
 } diff;
 
 typedef enum {

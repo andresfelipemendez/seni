@@ -138,17 +138,55 @@ parse_result parse_header(arena* a, char* header) {
 
 diff_result diff_structs(arena* a, char *old_header, char *new_header){
     diff_result res = {0};
-    parse_result old_header_ast_res = parse_header(a, old_header);
-    if (old_header_ast_res.err) {
-        char* msg = arena_sprintf(a, "old_header error: %s", old_header_ast_res.err);
-        res.err = msg ? msg : old_header_ast_res.err;
+    parse_result old_r = parse_header(a, old_header);
+    if (old_r.err) {
+        char* msg = arena_sprintf(a, "old_header error: %s", old_r.err);
+        res.err = msg ? msg : old_r.err;
         return res;
     }
-    ast old_header_ast = old_header_ast_res.value;
-    (void)old_header_ast;
-    parse_result new_header_ast_res = parse_header(a, new_header);
-    if (new_header_ast_res.err) {
-      
+    parse_result new_r = parse_header(a, new_header);
+    if (new_r.err) {
+        char* msg = arena_sprintf(a, "new_header error: %s", new_r.err);
+        res.err = msg ? msg : new_r.err;
+        return res;
+    }
+    ast old_ast = old_r.value;
+    ast new_ast = new_r.value;
+
+    res.value.struct_count = new_ast.struct_count;
+    if (new_ast.struct_count == 0) return res;
+    res.value.structs = allocate(a, sizeof(struct_diff) * new_ast.struct_count);
+    if (!res.value.structs) { res.err = "out of memory"; return res; }
+
+    for (size_t i = 0; i < new_ast.struct_count; i++) {
+        ast_struct* ns = &new_ast.structs[i];
+        struct_diff* sd = &res.value.structs[i];
+        sd->name = ns->name;
+        sd->new_fields = ns->fields;
+        sd->new_count = ns->fields_count;
+
+        ast_struct* os = NULL;
+        for (size_t j = 0; j < old_ast.struct_count; j++) {
+            if (strcmp(old_ast.structs[j].name, ns->name) == 0) { os = &old_ast.structs[j]; break; }
+        }
+        sd->old_fields = os ? os->fields : NULL;
+        sd->old_count = os ? os->fields_count : 0;
+
+        sd->ops_count = ns->fields_count;
+        sd->ops = NULL;
+        if (ns->fields_count > 0) {
+            sd->ops = allocate(a, sizeof(field_op) * ns->fields_count);
+            if (!sd->ops) { res.err = "out of memory"; return res; }
+        }
+        for (size_t f = 0; f < ns->fields_count; f++) {
+            field_op* op = &sd->ops[f];
+            op->name = ns->fields[f].name;
+            op->type = ns->fields[f].type;
+            op->kind = field_op_zero;
+            for (size_t g = 0; os && g < os->fields_count; g++) {
+                if (strcmp(os->fields[g].name, ns->fields[f].name) == 0) { op->kind = field_op_copy; break; }
+            }
+        }
     }
     return res;
 }

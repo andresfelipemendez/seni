@@ -188,6 +188,92 @@ UTEST(parse, line_count_after_closing_brace) {
     ASSERT_STREQ("struct missing name at line 4", r.err);
 }
 
+UTEST(diff, add_field) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* old_header =
+    "typedef struct {"
+        "float x, y;"
+    "} enemy;";
+    char* new_header =
+    "typedef struct {"
+        "float x, y;"
+        "int health;"
+    "} enemy;";
+    diff_result r = diff_structs(&a, old_header, new_header);
+    ASSERT_FALSE(r.err);
+    ASSERT_EQ((size_t)1, r.value.struct_count);
+    struct_diff* sd = &r.value.structs[0];
+    ASSERT_STREQ("enemy", sd->name);
+    ASSERT_EQ((size_t)2, sd->old_count);
+    ASSERT_EQ((size_t)3, sd->new_count);
+    ASSERT_EQ((size_t)3, sd->ops_count);
+    ASSERT_EQ(field_op_copy, sd->ops[0].kind);
+    ASSERT_STREQ("x", sd->ops[0].name);
+    ASSERT_EQ(field_op_copy, sd->ops[1].kind);
+    ASSERT_STREQ("y", sd->ops[1].name);
+    ASSERT_EQ(field_op_zero, sd->ops[2].kind);
+    ASSERT_STREQ("health", sd->ops[2].name);
+    ASSERT_EQ(ast_int, sd->ops[2].type);
+}
+
+UTEST(diff, remove_field) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* old_header =
+    "typedef struct {"
+        "float x, y;"
+        "int health;"
+    "} enemy;";
+    char* new_header =
+    "typedef struct {"
+        "float x, y;"
+    "} enemy;";
+    diff_result r = diff_structs(&a, old_header, new_header);
+    ASSERT_FALSE(r.err);
+    struct_diff* sd = &r.value.structs[0];
+    ASSERT_EQ((size_t)2, sd->ops_count);
+    ASSERT_EQ(field_op_copy, sd->ops[0].kind);
+    ASSERT_EQ(field_op_copy, sd->ops[1].kind);
+}
+
+UTEST(diff, new_struct) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* old_header = "";
+    char* new_header =
+    "typedef struct {"
+        "int score;"
+    "} player;";
+    diff_result r = diff_structs(&a, old_header, new_header);
+    ASSERT_FALSE(r.err);
+    ASSERT_EQ((size_t)1, r.value.struct_count);
+    struct_diff* sd = &r.value.structs[0];
+    ASSERT_EQ((size_t)0, sd->old_count);
+    ASSERT_EQ(field_op_zero, sd->ops[0].kind);
+}
+
+UTEST(diff, bad_old_header) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    diff_result r = diff_structs(&a, "typedef struct {\nlong x;\n} s;", "typedef struct {int x;} s;");
+    ASSERT_TRUE(r.err);
+    ASSERT_STREQ("old_header error: unknown type 'long' at line 2", r.err);
+}
+
+UTEST(diff, bad_new_header) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    diff_result r = diff_structs(&a, "typedef struct {int x;} s;", "typedef struct {\nlong x;\n} s;");
+    ASSERT_TRUE(r.err);
+    ASSERT_STREQ("new_header error: unknown type 'long' at line 2", r.err);
+}
+
 /*
 UTEST(foo, bar) {
     char buf[4096];
