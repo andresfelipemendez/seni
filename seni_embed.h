@@ -14,7 +14,17 @@
        SENI_EMBED_LAYOUT("path/to/structs.h");
 
    The path is resolved by the assembler relative to the compiler's working
-   directory. Bytes are byte-identical to the file -- no escaping, no codegen. */
+   directory -- NOT relative to the source file like #include -- so pass an
+   absolute path. Bytes are byte-identical to the file -- no escaping,
+   no codegen.
+
+   The preprocessor reads the layout header (#include) and the assembler
+   reads it again (.incbin) at different moments within one compile. If the
+   header is saved in between, the dll's embedded layout disagrees with the
+   layout it was compiled against -- the exact desync this embed exists to
+   prevent. Build scripts must snapshot the header to a path nothing
+   overwrites mid-compile and point both the #include and this macro at the
+   snapshot (see snapshot_layout in test_e2e.c). */
 
 #if defined(_WIN32)
 #define SENI_EMBED_EXPORT __declspec(dllexport)

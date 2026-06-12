@@ -15,6 +15,7 @@
 #include "arena.h"
 #include "arena.c"
 #include "seni.c"
+#include "seni_dump.h"
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -63,10 +64,9 @@ int main(void) {
     migrate_fn fn;
     enemy_a* old_blk;
     enemy_b* new_blk;
-    char src_path[128];
+    char src_path[256];
     char lib_path[128];
     char err_path[128];
-    FILE* f;
     volatile float sink = 0.0f;
 
     /* ---- hot path 1: parser over a big header ---- */
@@ -87,14 +87,10 @@ int main(void) {
     if (d.err) { fprintf(stderr, "diff: %s\n", d.err); return 1; }
     g = generate_migration(&a, d.value);
     if (g.err) { fprintf(stderr, "generate: %s\n", g.err); return 1; }
-    platform_make_dir("build");
-    sprintf(src_path, "build/bench_cache.c");
+    /* migration TU compiles from the build/seni_out audit log */
+    if (seni_dump_migration(g.code, "bench_cache", src_path, sizeof(src_path)) != 0) return 1;
     sprintf(lib_path, "build/bench_cache.%s", platform_lib_extension());
     sprintf(err_path, "build/bench_cache.err");
-    f = fopen(src_path, "wb");
-    if (!f) return 1;
-    fputs(g.code, f);
-    fclose(f);
     if (platform_compile_shared(src_path, lib_path, err_path) != 0) return 1;
     mod = platform_load_lib(lib_path);
     if (!mod) return 1;

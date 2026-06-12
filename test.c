@@ -740,6 +740,9 @@ UTEST(generate, add_field) {
     ASSERT_TRUE(strstr(g.code, "n[i].x = o[i].x;") != NULL);
     ASSERT_TRUE(strstr(g.code, "n[i].y = o[i].y;") != NULL);
     ASSERT_TRUE(strstr(g.code, "n[i].health = 0;") != NULL);
+    /* size exports: the reload driver learns both strides from the migration dll */
+    ASSERT_TRUE(strstr(g.code, "SENI_EXPORT const size_t migrate_enemy_old_size = sizeof(seni__enemy_old);") != NULL);
+    ASSERT_TRUE(strstr(g.code, "SENI_EXPORT const size_t migrate_enemy_new_size = sizeof(seni__enemy_new);") != NULL);
 }
 
 UTEST(generate, new_struct_no_old_typedef) {
@@ -750,9 +753,280 @@ UTEST(generate, new_struct_no_old_typedef) {
     ASSERT_FALSE(d.err);
     generate_result g = generate_migration(&a, d.value);
     ASSERT_FALSE(g.err);
-    ASSERT_TRUE(strstr(g.code, "player_old") == NULL);
+    /* no old typedef ("seni__player_old"); the substring "player_old" alone
+       would also match the migrate_player_old_size export */
+    ASSERT_TRUE(strstr(g.code, "seni__player_old") == NULL);
     ASSERT_TRUE(strstr(g.code, "(void)old_p;") != NULL);
     ASSERT_TRUE(strstr(g.code, "n[i].score = 0;") != NULL);
+    /* no old typedef to take sizeof: old size export must be a literal 0 */
+    ASSERT_TRUE(strstr(g.code, "SENI_EXPORT const size_t migrate_player_old_size = 0;") != NULL);
+    ASSERT_TRUE(strstr(g.code, "SENI_EXPORT const size_t migrate_player_new_size = sizeof(seni__player_new);") != NULL);
+}
+
+/* ---- annotations: the header text is the intent channel ---------------- */
+
+UTEST(parse, seni_was) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    parse_result r = parse_header(&a,
+        "typedef struct { int light_count SENI_WAS(num_lights); float x; } enemy;");
+    ASSERT_FALSE(r.err);
+    ASSERT_EQ((size_t)2, r.value.structs[0].fields_count);
+    ASSERT_STREQ("light_count", r.value.structs[0].fields[0].name);
+    ASSERT_STREQ("num_lights", r.value.structs[0].fields[0].was);
+    ASSERT_TRUE(r.value.structs[0].fields[1].was == NULL);
+}
+
+UTEST(parse, seni_was_on_array_field) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    parse_result r = parse_header(&a,
+        "typedef struct { float pos[4] SENI_WAS( old_pos ); } thing;");
+    ASSERT_FALSE(r.err);
+    ASSERT_STREQ("pos", r.value.structs[0].fields[0].name);
+    ASSERT_EQ((size_t)4, r.value.structs[0].fields[0].array_size);
+    ASSERT_STREQ("old_pos", r.value.structs[0].fields[0].was);
+}
+
+UTEST(parse, seni_was_malformed) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    parse_result r = parse_header(&a,
+        "typedef struct { int a SENI_WAS num_lights; } s;");
+    ASSERT_TRUE(r.err != NULL);
+    ASSERT_TRUE(strstr(r.err, "malformed SENI_WAS") != NULL);
+}
+
+UTEST(parse, seni_dropped) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    parse_result r = parse_header(&a,
+        "typedef struct {\n"
+        "    float x, y;\n"
+        "    SENI_DROPPED(num_lights)\n"
+        "    SENI_DROPPED(old_flags)\n"
+        "} enemy;");
+    ASSERT_FALSE(r.err);
+    ASSERT_EQ((size_t)2, r.value.structs[0].fields_count);
+    ASSERT_EQ((size_t)2, r.value.structs[0].dropped_count);
+    ASSERT_STREQ("num_lights", r.value.structs[0].dropped[0]);
+    ASSERT_STREQ("old_flags", r.value.structs[0].dropped[1]);
+}
+
+UTEST(parse, seni_dropped_malformed) {
+    char buf[4096];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    parse_result r = parse_header(&a,
+        "typedef struct { float x; SENI_DROPPED num_lights } enemy;");
+    ASSERT_TRUE(r.err != NULL);
+    ASSERT_TRUE(strstr(r.err, "malformed SENI_DROPPED") != NULL);
+}
+
+UTEST(diff, rename_via_was) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    diff_result d = diff_structs(&a,
+        "typedef struct { float x; int num_lights; } enemy;",
+        "typedef struct { float x; int light_count SENI_WAS(num_lights); } enemy;");
+    ASSERT_FALSE(d.err);
+    ASSERT_EQ((size_t)0, d.question_count);
+    ASSERT_EQ(field_op_copy, d.value.structs[0].ops[1].kind);
+    ASSERT_STREQ("light_count", d.value.structs[0].ops[1].name);
+    ASSERT_STREQ("num_lights", d.value.structs[0].ops[1].old_name);
+}
+
+UTEST(diff, rename_ambiguity_question) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    diff_result d = diff_structs(&a,
+        "typedef struct { float x; int num_lights; } enemy;",
+        "typedef struct { float x; int light_count; } enemy;");
+    ASSERT_FALSE(d.err); /* advisory, not an error: ops still built */
+    ASSERT_EQ((size_t)1, d.question_count);
+    ASSERT_STREQ("enemy", d.questions[0].struct_name);
+    ASSERT_STREQ("num_lights", d.questions[0].removed);
+    ASSERT_STREQ("light_count", d.questions[0].added);
+    ASSERT_TRUE(strstr(d.questions[0].message,
+        "struct enemy: 'num_lights' removed, 'light_count' added (both int)") != NULL);
+    ASSERT_TRUE(strstr(d.questions[0].message,
+        "rename?  annotate: int light_count SENI_WAS(num_lights);") != NULL);
+    ASSERT_TRUE(strstr(d.questions[0].message,
+        "really removed?  annotate: SENI_DROPPED(num_lights)") != NULL);
+    /* meanwhile the conservative op stands: added field zeroes */
+    ASSERT_EQ(field_op_zero, d.value.structs[0].ops[1].kind);
+}
+
+UTEST(diff, dropped_silences_question) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    diff_result d = diff_structs(&a,
+        "typedef struct { float x; int num_lights; } enemy;",
+        "typedef struct { float x; int light_count; SENI_DROPPED(num_lights) } enemy;");
+    ASSERT_FALSE(d.err);
+    ASSERT_EQ((size_t)0, d.question_count);
+    ASSERT_EQ(field_op_zero, d.value.structs[0].ops[1].kind);
+}
+
+UTEST(diff, no_question_when_types_differ) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    diff_result d = diff_structs(&a,
+        "typedef struct { float x; int num_lights; } enemy;",
+        "typedef struct { float x; float brightness; } enemy;");
+    ASSERT_FALSE(d.err);
+    ASSERT_EQ((size_t)0, d.question_count); /* int -> float can't be a rename */
+}
+
+UTEST(diff, was_missing_target_is_error) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    diff_result d = diff_structs(&a,
+        "typedef struct { float x; } enemy;",
+        "typedef struct { float x; int light_count SENI_WAS(num_lihgts); } enemy;");
+    ASSERT_TRUE(d.err != NULL);
+    ASSERT_TRUE(strstr(d.err, "SENI_WAS(num_lihgts)") != NULL);
+    ASSERT_TRUE(strstr(d.err, "no field 'num_lihgts'") != NULL);
+}
+
+UTEST(diff, was_type_mismatch_is_error) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    diff_result d = diff_structs(&a,
+        "typedef struct { float num_lights; } enemy;",
+        "typedef struct { int light_count SENI_WAS(num_lights); } enemy;");
+    ASSERT_TRUE(d.err != NULL);
+    ASSERT_TRUE(strstr(d.err, "'num_lights' is float") != NULL);
+    ASSERT_TRUE(strstr(d.err, "'light_count' is int") != NULL);
+}
+
+UTEST(diff, stale_was_is_inert) {
+    /* annotation left in the header after the rename migrated: the renamed
+       field now matches by name, SENI_WAS must never be consulted */
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    diff_result d = diff_structs(&a,
+        "typedef struct { float x; int light_count; } enemy;",
+        "typedef struct { float x; int light_count SENI_WAS(num_lights); } enemy;");
+    ASSERT_FALSE(d.err);
+    ASSERT_EQ((size_t)0, d.question_count);
+    ASSERT_EQ(field_op_copy, d.value.structs[0].ops[1].kind);
+    ASSERT_STREQ("light_count", d.value.structs[0].ops[1].old_name);
+}
+
+/* ---- annotation surgery: programmatic answers to diff questions -------- */
+
+UTEST(annotate, rename_round_trip) {
+    char buf[16384];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* old_header = "typedef struct { float x; int num_lights; } enemy;";
+    char* new_header =
+        "typedef struct {\n"
+        "    float x;\n"
+        "    int light_count;\n"
+        "} enemy;\n";
+    annotate_result an = annotate_rename(&a, new_header, "enemy", "num_lights", "light_count");
+    ASSERT_FALSE(an.err);
+    ASSERT_TRUE(strstr(an.code, "int light_count SENI_WAS(num_lights);") != NULL);
+    /* the produced text answers the question the un-annotated diff raises */
+    diff_result d = diff_structs(&a, old_header, an.code);
+    ASSERT_FALSE(d.err);
+    ASSERT_EQ((size_t)0, d.question_count);
+    ASSERT_EQ(field_op_copy, d.value.structs[0].ops[1].kind);
+    ASSERT_STREQ("num_lights", d.value.structs[0].ops[1].old_name);
+}
+
+UTEST(annotate, rename_array_field) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    annotate_result an = annotate_rename(&a,
+        "typedef struct { float pos[4]; } thing;", "thing", "old_pos", "pos");
+    ASSERT_FALSE(an.err);
+    ASSERT_TRUE(strstr(an.code, "float pos[4] SENI_WAS(old_pos);") != NULL);
+}
+
+UTEST(annotate, rename_in_comma_list) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    annotate_result an = annotate_rename(&a,
+        "typedef struct { float x, y, z; } v;", "v", "old_y", "y");
+    ASSERT_FALSE(an.err);
+    ASSERT_TRUE(strstr(an.code, "float x, y SENI_WAS(old_y), z;") != NULL);
+}
+
+UTEST(annotate, rename_tag_style_struct) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    annotate_result an = annotate_rename(&a,
+        "struct player { int hp; };", "player", "health", "hp");
+    ASSERT_FALSE(an.err);
+    ASSERT_TRUE(strstr(an.code, "int hp SENI_WAS(health);") != NULL);
+}
+
+UTEST(annotate, rename_errors) {
+    char buf[8192];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* h = "typedef struct { int hp SENI_WAS(health); } player;";
+    annotate_result an = annotate_rename(&a, h, "ghost", "a", "b");
+    ASSERT_TRUE(an.err != NULL);
+    ASSERT_TRUE(strstr(an.err, "struct 'ghost' not found") != NULL);
+    an = annotate_rename(&a, h, "player", "health", "hp"); /* already annotated */
+    ASSERT_TRUE(an.err != NULL);
+    ASSERT_TRUE(strstr(an.err, "'hp' not found in struct 'player'") != NULL);
+}
+
+UTEST(annotate, dropped_round_trip) {
+    char buf[16384];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    char* old_header = "typedef struct { float x; int num_lights; } enemy;";
+    char* new_header =
+        "typedef struct {\n"
+        "    float x;\n"
+        "    int light_count;\n"
+        "} enemy;\n";
+    annotate_result an = annotate_dropped(&a, new_header, "enemy", "num_lights");
+    ASSERT_FALSE(an.err);
+    ASSERT_TRUE(strstr(an.code, "    SENI_DROPPED(num_lights)\n} enemy;") != NULL);
+    diff_result d = diff_structs(&a, old_header, an.code);
+    ASSERT_FALSE(d.err);
+    ASSERT_EQ((size_t)0, d.question_count);
+    ASSERT_EQ(field_op_zero, d.value.structs[0].ops[1].kind);
+    /* answering twice is refused */
+    an = annotate_dropped(&a, an.code, "enemy", "num_lights");
+    ASSERT_TRUE(an.err != NULL);
+    ASSERT_TRUE(strstr(an.err, "SENI_DROPPED(num_lights) already present") != NULL);
+}
+
+UTEST(generate, rename_copies_from_old_name) {
+    char buf[16384];
+    arena a;
+    create_arena(&a, buf, sizeof(buf));
+    diff_result d = diff_structs(&a,
+        "typedef struct { float x; int num_lights; float old_pos[4]; } enemy;",
+        "typedef struct { float x; int light_count SENI_WAS(num_lights); float pos[2] SENI_WAS(old_pos); } enemy;");
+    ASSERT_FALSE(d.err);
+    ASSERT_EQ((size_t)0, d.question_count);
+    generate_result g = generate_migration(&a, d.value);
+    ASSERT_FALSE(g.err);
+    ASSERT_TRUE(strstr(g.code, "n[i].light_count = o[i].num_lights;") != NULL);
+    ASSERT_TRUE(strstr(g.code, "n[i].pos[j] = o[i].old_pos[j];") != NULL);
 }
 
 UTEST(generate, out_of_memory) {

@@ -87,10 +87,12 @@ static char* strip_comments(arena* a, char* src, char** err_out) {
     return dst;
 }
 
-/* shared scan: counts structs, and when field_counts is non-NULL also tallies
-   field separators per struct. running it twice (count, allocate, fill) means
-   there is no fixed struct cap -- the arena is the only limit. */
-static size_t scan_structs(char* header, size_t* field_counts) {
+/* shared scan: counts structs, and when field_counts/dropped_counts are
+   non-NULL also tallies field separators and SENI_DROPPED annotations per
+   struct. running it twice (count, allocate, fill) means there is no fixed
+   struct cap -- the arena is the only limit. counts may over-count (the
+   parse pass is stricter); they only size allocations. */
+static size_t scan_structs(char* header, size_t* field_counts, size_t* dropped_counts) {
     size_t struct_count = 0;
     int in_struct = 0;
     int i;
@@ -104,6 +106,10 @@ static size_t scan_structs(char* header, size_t* field_counts) {
             i += m - 1;
         } else if (in_struct && (header[i] == ',' || header[i] == ';')) {
             if (field_counts) field_counts[struct_count - 1]++;
+        } else if (in_struct && strncmp(&header[i], "SENI_DROPPED", 12) == 0 &&
+                   !is_ident(header[i + 12])) {
+            if (dropped_counts) dropped_counts[struct_count - 1]++;
+            i += 11;
         } else if (in_struct && header[i] == '}') {
             in_struct = 0;
         }
@@ -117,9 +123,11 @@ parse_result parse_header(arena* a, char* header) {
     size_t* field_counts;
     size_t fc;
     int i;
+    size_t* dropped_counts;
     parse_state state;
     size_t si;
     size_t fi;
+    size_t di;
     ast_type cur_type;
     int line;
     const char* tag;
@@ -131,14 +139,16 @@ parse_result parse_header(arena* a, char* header) {
     header = strip_comments(a, header, &strip_err);
     if (!header) { r.err = strip_err; return r; }
 
-    struct_count = scan_structs(header, NULL);
+    struct_count = scan_structs(header, NULL, NULL);
     if (struct_count == 0) {
         return r;
     }
     field_counts = allocate(a, sizeof(size_t) * struct_count);
     if (!field_counts) { r.err = "out of memory"; return r; }
-    for (fc = 0; fc < struct_count; fc++) field_counts[fc] = 0;
-    scan_structs(header, field_counts);
+    dropped_counts = allocate(a, sizeof(size_t) * struct_count);
+    if (!dropped_counts) { r.err = "out of memory"; return r; }
+    for (fc = 0; fc < struct_count; fc++) { field_counts[fc] = 0; dropped_counts[fc] = 0; }
+    scan_structs(header, field_counts, dropped_counts);
     r.value.struct_count = struct_count;
     r.value.structs = allocate(a, sizeof(ast_struct) * struct_count);
     if (!r.value.structs) { r.err = "out of memory"; return r; }
@@ -162,6 +172,7 @@ parse_result parse_header(arena* a, char* header) {
                 }
                 state = PARSE_IN_STRUCT;
                 fi = 0;
+                di = 0;
                 if (field_counts[si] > 0) {
                     r.value.structs[si].fields = allocate(a, sizeof(ast_field) * field_counts[si]);
                     if (!r.value.structs[si].fields) { r.err = "out of memory"; return r; }
@@ -169,6 +180,13 @@ parse_result parse_header(arena* a, char* header) {
                     r.value.structs[si].fields = NULL; /* arena memory is not zeroed */
                 }
                 r.value.structs[si].fields_count = 0;
+                if (dropped_counts[si] > 0) {
+                    r.value.structs[si].dropped = allocate(a, sizeof(char*) * dropped_counts[si]);
+                    if (!r.value.structs[si].dropped) { r.err = "out of memory"; return r; }
+                } else {
+                    r.value.structs[si].dropped = NULL;
+                }
+                r.value.structs[si].dropped_count = 0;
                 i += m - 1;
                 continue;
             }
@@ -219,6 +237,7 @@ parse_result parse_header(arena* a, char* header) {
             r.value.structs[si].name = arena_copy_string(a, &header[start], len);
             if (!r.value.structs[si].name) { r.err = "out of memory"; return r; }
             r.value.structs[si].fields_count = fi;
+            r.value.structs[si].dropped_count = di;
             si++;
             state = PARSE_OUTSIDE;
             if (header[i] == '\0') break;
@@ -227,7 +246,45 @@ parse_result parse_header(arena* a, char* header) {
             /* keyword + any whitespace after it. i stays on the last keyword
                char and we continue, so the loop top sees (and line-counts)
                the whitespace, then READ_FIELD_NAME skips it. */
-            if (strncmp(&header[i], "float", 5) == 0 && is_white_space(header[i + 5])) {
+            if (strncmp(&header[i], "SENI_DROPPED", 12) == 0 && !is_ident(header[i + 12])) {
+                /* SENI_DROPPED(name) -- deliberate field removal. no
+                   trailing semicolon: the macro expands to nothing and c89
+                   forbids a bare ';' in a struct body. */
+                int p = i + 12;
+                int nstart;
+                int nlen;
+                while (is_white_space(header[p])) { if (header[p] == '\n') line++; p++; }
+                if (header[p] != '(') {
+                    char* msg = arena_sprintf(a, "malformed SENI_DROPPED at line %d, expected SENI_DROPPED(field_name)", line);
+                    r.err = msg ? msg : "malformed SENI_DROPPED";
+                    return r;
+                }
+                p++;
+                while (is_white_space(header[p])) { if (header[p] == '\n') line++; p++; }
+                nstart = p;
+                while (is_ident(header[p])) p++;
+                nlen = p - nstart;
+                while (is_white_space(header[p])) { if (header[p] == '\n') line++; p++; }
+                if (nlen == 0 || header[p] != ')') {
+                    char* msg = arena_sprintf(a, "malformed SENI_DROPPED at line %d, expected SENI_DROPPED(field_name)", line);
+                    r.err = msg ? msg : "malformed SENI_DROPPED";
+                    return r;
+                }
+                if (nlen > MAX_NAME) {
+                    char* msg = arena_sprintf(a, "SENI_DROPPED name too long (%d chars, max %d) at line %d", nlen, MAX_NAME, line);
+                    r.err = msg ? msg : "SENI_DROPPED name too long";
+                    return r;
+                }
+                if (di >= dropped_counts[si]) {
+                    r.err = "internal error: dropped count mismatch";
+                    return r;
+                }
+                r.value.structs[si].dropped[di] = arena_copy_string(a, &header[nstart], nlen);
+                if (!r.value.structs[si].dropped[di]) { r.err = "out of memory"; return r; }
+                di++;
+                i = p; /* on ')'; loop increment moves past it */
+                continue;
+            } else if (strncmp(&header[i], "float", 5) == 0 && is_white_space(header[i + 5])) {
                 cur_type = ast_float;
                 i += 4;
                 state = PARSE_READ_FIELD_NAME;
@@ -275,6 +332,7 @@ parse_result parse_header(arena* a, char* header) {
             int len;
             int k;
             size_t arr_size = 0;
+            char* was = NULL;
             while (header[i] != ';' && header[i] != ',' && header[i] != '\0') {
                 if (header[i] == '\n') line++;
                 i++;
@@ -286,6 +344,53 @@ parse_result parse_header(arena* a, char* header) {
             }
             len = i - start;
             while (len > 0 && is_white_space(header[start + len - 1])) len--;
+            /* optional trailing SENI_WAS(old_name) annotation: record it and
+               slice it off, so the rest of the declarator parses as before */
+            for (k = 0; k + 8 <= len; k++) {
+                if (strncmp(&header[start + k], "SENI_WAS", 8) == 0 &&
+                    (k == 0 || !is_ident(header[start + k - 1])) &&
+                    !is_ident(header[start + k + 8])) break;
+            }
+            if (k + 8 <= len) {
+                int p = start + k + 8;
+                int end = start + len;
+                int nstart;
+                int nlen;
+                while (p < end && is_white_space(header[p])) p++;
+                if (p >= end || header[p] != '(') {
+                    char* msg = arena_sprintf(a, "malformed SENI_WAS at line %d, expected SENI_WAS(old_field_name)", line);
+                    r.err = msg ? msg : "malformed SENI_WAS";
+                    return r;
+                }
+                p++;
+                while (p < end && is_white_space(header[p])) p++;
+                nstart = p;
+                while (p < end && is_ident(header[p])) p++;
+                nlen = p - nstart;
+                while (p < end && is_white_space(header[p])) p++;
+                if (nlen == 0 || p >= end || header[p] != ')') {
+                    char* msg = arena_sprintf(a, "malformed SENI_WAS at line %d, expected SENI_WAS(old_field_name)", line);
+                    r.err = msg ? msg : "malformed SENI_WAS";
+                    return r;
+                }
+                p++;
+                while (p < end && is_white_space(header[p])) p++;
+                if (p < end) {
+                    int echo = end - p > MAX_TOKEN_ECHO ? MAX_TOKEN_ECHO : end - p;
+                    char* msg = arena_sprintf(a, "unexpected '%.*s' after SENI_WAS at line %d", echo, &header[p], line);
+                    r.err = msg ? msg : "unexpected text after SENI_WAS";
+                    return r;
+                }
+                if (nlen > MAX_NAME) {
+                    char* msg = arena_sprintf(a, "SENI_WAS name too long (%d chars, max %d) at line %d", nlen, MAX_NAME, line);
+                    r.err = msg ? msg : "SENI_WAS name too long";
+                    return r;
+                }
+                was = arena_copy_string(a, &header[nstart], nlen);
+                if (!was) { r.err = "out of memory"; return r; }
+                len = k;
+                while (len > 0 && is_white_space(header[start + len - 1])) len--;
+            }
             for (k = 0; k < len; k++) {
                 if (header[start + k] == '*') {
                     int echo = len > MAX_TOKEN_ECHO ? MAX_TOKEN_ECHO : len;
@@ -341,6 +446,7 @@ parse_result parse_header(arena* a, char* header) {
             if (!r.value.structs[si].fields[fi].name) { r.err = "out of memory"; return r; }
             r.value.structs[si].fields[fi].type = cur_type;
             r.value.structs[si].fields[fi].array_size = arr_size;
+            r.value.structs[si].fields[fi].was = was;
             fi++;
             if (header[i] == ',') {
                 state = PARSE_READ_FIELD_NAME;
@@ -441,6 +547,21 @@ generate_result generate_migration(arena* a, diff d) {
             emit_field(&b, &sd->new_fields[j]);
         sb_appendf(&b, "} seni__%s_new;\n", sd->name);
 
+        /* element sizes for both layouts: the migration dll is the only
+           artifact that compiled both typedefs, so it is the only place a
+           reload driver can learn the new stride (to allocate in the new
+           image) and the old stride (to cross-check against the registry
+           entry the old code wrote -- a mismatch means the registry and the
+           diffed old layout disagree). old size is 0 when the struct did not
+           exist in the old layout. */
+        if (sd->old_count > 0)
+            sb_appendf(&b, "SENI_EXPORT const size_t migrate_%s_old_size = sizeof(seni__%s_old);\n",
+                       sd->name, sd->name);
+        else
+            sb_appendf(&b, "SENI_EXPORT const size_t migrate_%s_old_size = 0;\n", sd->name);
+        sb_appendf(&b, "SENI_EXPORT const size_t migrate_%s_new_size = sizeof(seni__%s_new);\n",
+                   sd->name, sd->name);
+
         sb_appendf(&b, "SENI_EXPORT void migrate_%s(void* old_p, void* new_p, size_t count) {\n", sd->name);
         if (sd->old_count > 0)
             sb_appendf(&b, "    seni__%s_old* o = (seni__%s_old*)old_p;\n", sd->name, sd->name);
@@ -454,22 +575,23 @@ generate_result generate_migration(arena* a, diff d) {
         for (j = 0; j < sd->ops_count; j++) {
             field_op* op = &sd->ops[j];
             if (op->kind == field_op_copy) {
+                /* old_name differs from name only for SENI_WAS renames */
                 if (op->old_array_size == 0 && op->new_array_size == 0) {
-                    sb_appendf(&b, "        n[i].%s = o[i].%s;\n", op->name, op->name);
+                    sb_appendf(&b, "        n[i].%s = o[i].%s;\n", op->name, op->old_name);
                 } else if (op->old_array_size > 0 && op->new_array_size > 0) {
                     size_t m = op->old_array_size < op->new_array_size ? op->old_array_size : op->new_array_size;
                     sb_appendf(&b, "        for (j = 0; j < %lu; j++) n[i].%s[j] = o[i].%s[j];\n",
-                               (unsigned long)m, op->name, op->name);
+                               (unsigned long)m, op->name, op->old_name);
                     if (op->new_array_size > m)
                         sb_appendf(&b, "        for (j = %lu; j < %lu; j++) n[i].%s[j] = 0;\n",
                                    (unsigned long)m, (unsigned long)op->new_array_size, op->name);
                 } else if (op->old_array_size == 0) { /* scalar -> array */
-                    sb_appendf(&b, "        n[i].%s[0] = o[i].%s;\n", op->name, op->name);
+                    sb_appendf(&b, "        n[i].%s[0] = o[i].%s;\n", op->name, op->old_name);
                     if (op->new_array_size > 1)
                         sb_appendf(&b, "        for (j = 1; j < %lu; j++) n[i].%s[j] = 0;\n",
                                    (unsigned long)op->new_array_size, op->name);
                 } else { /* array -> scalar */
-                    sb_appendf(&b, "        n[i].%s = o[i].%s[0];\n", op->name, op->name);
+                    sb_appendf(&b, "        n[i].%s = o[i].%s[0];\n", op->name, op->old_name);
                 }
             } else {
                 if (op->new_array_size == 0)
@@ -488,6 +610,183 @@ generate_result generate_migration(arena* a, diff d) {
     return r;
 }
 
+/* ---- annotation surgery ------------------------------------------------ */
+
+/* if a comment starts at i, return the index just past it; else i. an
+   unterminated block comment runs to the end of the text. */
+static size_t skip_comment(const char* s, size_t i) {
+    if (s[i] == '/' && s[i + 1] == '*') {
+        i += 2;
+        while (s[i] != '\0' && !(s[i] == '*' && s[i + 1] == '/')) i++;
+        if (s[i] != '\0') i += 2;
+    } else if (s[i] == '/' && s[i + 1] == '/') {
+        while (s[i] != '\0' && s[i] != '\n') i++;
+    }
+    return i;
+}
+
+/* locate struct `name` in header text (comment-aware, both typedef and
+   tag styles): *body_out = index just past '{', *close_out = index of '}'.
+   returns 0 when found. */
+static int find_struct_body(char* header, const char* name,
+                            size_t* body_out, size_t* close_out) {
+    size_t i = 0;
+    size_t nlen = strlen(name);
+    const char* tag;
+    int tag_len;
+    while (header[i] != '\0') {
+        size_t j = skip_comment(header, i);
+        if (j != i) { i = j; continue; }
+        {
+            int m = match_struct_start(&header[i], &tag, &tag_len);
+            if (m) {
+                size_t body = i + (size_t)m;
+                size_t k = body;
+                size_t close;
+                size_t ns;
+                while (header[k] != '\0' && header[k] != '}') {
+                    size_t k2 = skip_comment(header, k);
+                    if (k2 != k) { k = k2; continue; }
+                    k++;
+                }
+                if (header[k] == '\0') return 1;
+                close = k;
+                k++;
+                while (is_white_space(header[k])) k++;
+                ns = k;
+                while (is_ident(header[k])) k++;
+                if ((k - ns == nlen && strncmp(&header[ns], name, nlen) == 0) ||
+                    (k == ns && (size_t)tag_len == nlen && strncmp(tag, name, nlen) == 0)) {
+                    *body_out = body;
+                    *close_out = close;
+                    return 0;
+                }
+                i = k;
+                continue;
+            }
+        }
+        i++;
+    }
+    return 1;
+}
+
+/* header[0..at) + insert + header[at..] */
+static annotate_result splice(arena* a, char* header, size_t at, char* insert) {
+    annotate_result r = {0};
+    size_t hlen = strlen(header);
+    size_t ilen = strlen(insert);
+    char* out = allocate_bytes(a, hlen + ilen + 1);
+    if (!out) { r.err = "out of memory"; return r; }
+    memcpy(out, header, at);
+    memcpy(out + at, insert, ilen);
+    memcpy(out + at + ilen, header + at, hlen - at + 1);
+    r.code = out;
+    return r;
+}
+
+annotate_result annotate_rename(arena* a, char* header, const char* struct_name,
+                                const char* old_name, const char* new_name) {
+    annotate_result r = {0};
+    size_t body;
+    size_t close;
+    size_t i;
+    size_t at = 0;
+    size_t nlen = strlen(new_name);
+    char* ins;
+    if (find_struct_body(header, struct_name, &body, &close)) {
+        char* msg = arena_sprintf(a, "annotate: struct '%s' not found in header", struct_name);
+        r.err = msg ? msg : "annotate: struct not found";
+        return r;
+    }
+    i = body;
+    while (i < close) {
+        size_t j = skip_comment(header, i);
+        if (j != i) { i = j; continue; }
+        if (is_ident(header[i])) {
+            size_t s = i;
+            while (i < close && is_ident(header[i])) i++;
+            if (i - s == nlen && strncmp(&header[s], new_name, nlen) == 0) {
+                /* declarator position: optional [N], then ';' or ',' --
+                   anything else (e.g. an existing SENI_WAS) is no match */
+                size_t p = i;
+                while (p < close && is_white_space(header[p])) p++;
+                if (header[p] == '[') {
+                    while (p < close && header[p] != ']') p++;
+                    if (header[p] == ']') p++;
+                    while (p < close && is_white_space(header[p])) p++;
+                }
+                if (p < close && (header[p] == ';' || header[p] == ',')) { at = p; break; }
+            }
+            continue;
+        }
+        i++;
+    }
+    if (at == 0) {
+        char* msg = arena_sprintf(a, "annotate: field '%s' not found in struct '%s' (or already annotated)",
+                                  new_name, struct_name);
+        r.err = msg ? msg : "annotate: field not found";
+        return r;
+    }
+    ins = arena_sprintf(a, " SENI_WAS(%s)", old_name);
+    if (!ins) { r.err = "out of memory"; return r; }
+    return splice(a, header, at, ins);
+}
+
+annotate_result annotate_dropped(arena* a, char* header, const char* struct_name,
+                                 const char* old_name) {
+    annotate_result r = {0};
+    size_t body;
+    size_t close;
+    size_t i;
+    size_t ls;
+    size_t nlen = strlen(old_name);
+    char* ins;
+    if (find_struct_body(header, struct_name, &body, &close)) {
+        char* msg = arena_sprintf(a, "annotate: struct '%s' not found in header", struct_name);
+        r.err = msg ? msg : "annotate: struct not found";
+        return r;
+    }
+    /* refuse a duplicate SENI_DROPPED(old_name) */
+    i = body;
+    while (i < close) {
+        size_t j = skip_comment(header, i);
+        if (j != i) { i = j; continue; }
+        if (strncmp(&header[i], "SENI_DROPPED", 12) == 0 && !is_ident(header[i + 12])) {
+            size_t p = i + 12;
+            size_t s;
+            while (p < close && is_white_space(header[p])) p++;
+            if (header[p] == '(') {
+                p++;
+                while (p < close && is_white_space(header[p])) p++;
+                s = p;
+                while (p < close && is_ident(header[p])) p++;
+                if (p - s == nlen && strncmp(&header[s], old_name, nlen) == 0) {
+                    char* msg = arena_sprintf(a, "annotate: SENI_DROPPED(%s) already present in struct '%s'",
+                                              old_name, struct_name);
+                    r.err = msg ? msg : "annotate: already dropped";
+                    return r;
+                }
+            }
+            i = p;
+            continue;
+        }
+        i++;
+    }
+    /* insert as its own line above the line holding the closing brace */
+    ls = close;
+    while (ls > 0 && header[ls - 1] != '\n') ls--;
+    ins = arena_sprintf(a, "    SENI_DROPPED(%s)\n", old_name);
+    if (!ins) { r.err = "out of memory"; return r; }
+    return splice(a, header, ls, ins);
+}
+
+/* questions are discovered struct by struct but returned as one array;
+   collect them in an arena-backed chain, then flatten */
+typedef struct seni_q_node {
+    diff_question q;
+    struct seni_q_node* next;
+} seni_q_node;
+
 diff_result diff_structs(arena* a, char *old_header, char *new_header){
     diff_result res = {0};
     parse_result old_r;
@@ -495,6 +794,8 @@ diff_result diff_structs(arena* a, char *old_header, char *new_header){
     ast old_ast;
     ast new_ast;
     size_t i;
+    seni_q_node* q_head = NULL;
+    seni_q_node* q_tail = NULL;
 
     old_r = parse_header(a, old_header);
     if (old_r.err) {
@@ -543,6 +844,7 @@ diff_result diff_structs(arena* a, char *old_header, char *new_header){
             field_op* op = &sd->ops[f];
             size_t g;
             op->name = ns->fields[f].name;
+            op->old_name = ns->fields[f].name;
             op->type = ns->fields[f].type;
             op->kind = field_op_zero;
             op->old_array_size = 0;
@@ -561,7 +863,98 @@ diff_result diff_structs(arena* a, char *old_header, char *new_header){
                     break;
                 }
             }
+            /* rename: SENI_WAS is consulted only when no same-name match
+               exists, so an annotation left in the header after its rename
+               has migrated is inert (the renamed field matches by name on
+               every later diff). when consulted, it must resolve -- a typo'd
+               SENI_WAS that silently zeroed would be the exact data-loss
+               class the annotation exists to prevent. */
+            if (op->kind == field_op_zero && ns->fields[f].was) {
+                for (g = 0; os && g < os->fields_count; g++) {
+                    if (strcmp(os->fields[g].name, ns->fields[f].was) == 0) break;
+                }
+                if (!os || g >= os->fields_count) {
+                    char* msg = arena_sprintf(a, "field '%s' in struct '%s': SENI_WAS(%s) but old layout has no field '%s'",
+                                              ns->fields[f].name, ns->name,
+                                              ns->fields[f].was, ns->fields[f].was);
+                    res.err = msg ? msg : "SENI_WAS names a missing old field";
+                    return res;
+                }
+                if (os->fields[g].type != ns->fields[f].type) {
+                    char* msg = arena_sprintf(a, "field '%s' in struct '%s': SENI_WAS(%s) but '%s' is %s and '%s' is %s, cannot migrate rename",
+                                              ns->fields[f].name, ns->name, ns->fields[f].was,
+                                              ns->fields[f].was, type_name(os->fields[g].type),
+                                              ns->fields[f].name, type_name(ns->fields[f].type));
+                    res.err = msg ? msg : "SENI_WAS type mismatch, cannot migrate rename";
+                    return res;
+                }
+                op->kind = field_op_copy;
+                op->old_name = os->fields[g].name;
+                op->old_array_size = os->fields[g].array_size;
+            }
         }
+
+        /* ambiguity advisor: a removed old field plus a same-type added new
+           field is either a rename or a real removal, and the diff cannot
+           know which. raise a question per candidate pair unless the header
+           already answers it (SENI_WAS consumed the pair above; SENI_DROPPED
+           declares the removal deliberate). */
+        if (os) {
+            size_t g;
+            for (g = 0; g < os->fields_count; g++) {
+                size_t h;
+                int matched = 0;
+                int declared_dropped = 0;
+                for (h = 0; h < sd->ops_count; h++) {
+                    if (sd->ops[h].kind == field_op_copy &&
+                        strcmp(sd->ops[h].old_name, os->fields[g].name) == 0) { matched = 1; break; }
+                }
+                if (matched) continue;
+                for (h = 0; h < ns->dropped_count; h++) {
+                    if (strcmp(ns->dropped[h], os->fields[g].name) == 0) { declared_dropped = 1; break; }
+                }
+                if (declared_dropped) continue;
+                for (h = 0; h < sd->ops_count; h++) {
+                    field_op* op = &sd->ops[h];
+                    seni_q_node* node;
+                    char* decl;
+                    char* msg;
+                    if (op->kind != field_op_zero || op->type != os->fields[g].type) continue;
+                    if (ns->fields[h].was) continue; /* annotated rename from another field */
+                    if (op->new_array_size > 0)
+                        decl = arena_sprintf(a, "%s %s[%lu]", type_name(op->type), op->name,
+                                             (unsigned long)op->new_array_size);
+                    else
+                        decl = arena_sprintf(a, "%s %s", type_name(op->type), op->name);
+                    if (!decl) { res.err = "out of memory"; return res; }
+                    msg = arena_sprintf(a, "struct %s: '%s' removed, '%s' added (both %s)\n"
+                                           "      rename?  annotate: %s SENI_WAS(%s);\n"
+                                           "      really removed?  annotate: SENI_DROPPED(%s)",
+                                        ns->name, os->fields[g].name, op->name, type_name(op->type),
+                                        decl, os->fields[g].name, os->fields[g].name);
+                    if (!msg) { res.err = "out of memory"; return res; }
+                    node = allocate(a, sizeof(seni_q_node));
+                    if (!node) { res.err = "out of memory"; return res; }
+                    node->q.struct_name = ns->name;
+                    node->q.removed = os->fields[g].name;
+                    node->q.added = op->name;
+                    node->q.type = op->type;
+                    node->q.message = msg;
+                    node->next = NULL;
+                    if (q_tail) { q_tail->next = node; q_tail = node; }
+                    else { q_head = q_tail = node; }
+                    res.question_count++;
+                }
+            }
+        }
+    }
+
+    if (res.question_count > 0) {
+        seni_q_node* n = q_head;
+        size_t qi = 0;
+        res.questions = allocate(a, sizeof(diff_question) * res.question_count);
+        if (!res.questions) { res.err = "out of memory"; return res; }
+        for (; n; n = n->next) res.questions[qi++] = n->q;
     }
     return res;
 }

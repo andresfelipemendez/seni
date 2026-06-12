@@ -23,6 +23,7 @@
 #include "arena.h"
 #include "arena.c"
 #include "seni.c"
+#include "seni_dump.h"
 
 UTEST_MAIN()
 
@@ -356,19 +357,14 @@ UTEST(fuzz, diff_generate_pipeline) {
     }
 }
 
+/* migration TUs compile from the build/seni_out/migration_NNN.c audit log */
 static platform_lib compile_and_load_fz(const char* code, const char* name) {
     char src_path[256];
     char lib_path[256];
     char err_path[256];
-    FILE* f;
-    platform_make_dir("build");
-    sprintf(src_path, "build/%s.c", name);
+    if (seni_dump_migration(code, name, src_path, sizeof(src_path)) != 0) return NULL;
     sprintf(lib_path, "build/%s.%s", name, platform_lib_extension());
     sprintf(err_path, "build/%s.err", name);
-    f = fopen(src_path, "wb");
-    if (!f) return NULL;
-    fputs(code, f);
-    fclose(f);
     if (platform_compile_shared(src_path, lib_path, err_path) != 0) {
         fprintf(stderr, "gcc failed for %s, generated code:\n%s\n", src_path, code);
         return NULL;
