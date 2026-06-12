@@ -117,4 +117,10 @@ annotate_result annotate_rename(arena* a, char* header, const char* struct_name,
 /* insert `    SENI_DROPPED(old_name)` before the struct's closing brace */
 annotate_result annotate_dropped(arena* a, char* header, const char* struct_name,
                                  const char* old_name);
+/* remove every SENI_WAS(...) annotation (outside comments). after a
+   successful migration they are all inert -- the next diff's old layout is
+   this very header, every field matches by name -- so hosts can strip the
+   history once it has served. SENI_DEFAULT / SENI_DROPPED are untouched.
+   returns the original pointer in code when nothing was stripped. */
+annotate_result strip_was(arena* a, char* header);
 #endif

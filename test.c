@@ -1029,6 +1029,38 @@ UTEST(generate, rename_copies_from_old_name) {
     ASSERT_TRUE(strstr(g.code, "n[i].pos[j] = o[i].old_pos[j];") != NULL);
 }
 
+UTEST(strip, removes_all_was_keeps_everything_else) {
+    char buf[8192];
+    arena a;
+    annotate_result r;
+    create_arena(&a, buf, sizeof(buf));
+    r = strip_was(&a,
+        "/* SENI_WAS(in_comment) stays */\n"
+        "typedef struct {\n"
+        "    int light_count SENI_WAS(num_lights);\n"
+        "    float spin SENI_WAS(rate) SENI_DEFAULT(1.8f);\n"
+        "    SENI_DROPPED(legacy)\n"
+        "} enemy;\n");
+    ASSERT_FALSE(r.err);
+    ASSERT_TRUE(strstr(r.code, "SENI_WAS(in_comment)") != NULL);
+    ASSERT_TRUE(strstr(r.code, "int light_count;") != NULL);
+    ASSERT_TRUE(strstr(r.code, "float spin SENI_DEFAULT(1.8f);") != NULL);
+    ASSERT_TRUE(strstr(r.code, "SENI_DROPPED(legacy)") != NULL);
+    ASSERT_TRUE(strstr(r.code, "SENI_WAS(num_lights)") == NULL);
+    ASSERT_TRUE(strstr(r.code, "SENI_WAS(rate)") == NULL);
+}
+
+UTEST(strip, untouched_header_returns_same_pointer) {
+    char buf[4096];
+    arena a;
+    char src[] = "typedef struct { float x SENI_DEFAULT(1.0f); } s;\n";
+    annotate_result r;
+    create_arena(&a, buf, sizeof(buf));
+    r = strip_was(&a, src);
+    ASSERT_FALSE(r.err);
+    ASSERT_TRUE(r.code == src); /* no-op signalled by identity */
+}
+
 UTEST(parse, seni_default) {
     char buf[4096];
     arena a;

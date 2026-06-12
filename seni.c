@@ -819,6 +819,54 @@ annotate_result annotate_dropped(arena* a, char* header, const char* struct_name
     return splice(a, header, ls, ins);
 }
 
+annotate_result strip_was(arena* a, char* header) {
+    annotate_result r = {0};
+    size_t hlen = strlen(header);
+    char* out;
+    size_t o = 0;
+    size_t i = 0;
+    int stripped = 0;
+    out = allocate_bytes(a, hlen + 1);
+    if (!out) { r.err = "out of memory"; return r; }
+    while (header[i] != '\0') {
+        size_t j = skip_comment(header, i);
+        if (j != i) {
+            /* comments copy verbatim -- prose may mention SENI_WAS */
+            memcpy(out + o, header + i, j - i);
+            o += j - i;
+            i = j;
+            continue;
+        }
+        if (strncmp(&header[i], "SENI_WAS", 8) == 0 &&
+            (i == 0 || !is_ident(header[i - 1])) &&
+            !is_ident(header[i + 8])) {
+            size_t p = i + 8;
+            while (header[p] != '\0' && is_white_space(header[p])) p++;
+            if (header[p] == '(') {
+                size_t q = p + 1;
+                while (header[q] != '\0' && header[q] != ')' && header[q] != ';' &&
+                       header[q] != '\n') q++;
+                if (header[q] == ')') {
+                    /* drop the annotation plus the space run before it */
+                    while (o > 0 && (out[o - 1] == ' ' || out[o - 1] == '\t')) o--;
+                    i = q + 1;
+                    stripped = 1;
+                    continue;
+                }
+            }
+            /* malformed: leave it for the parser to report */
+        }
+        out[o++] = header[i++];
+    }
+    out[o] = '\0';
+    if (!stripped) {
+        r.code = header; /* untouched: callers can skip the file write */
+        return r;
+    }
+    r.code = out;
+    return r;
+}
+
 /* questions are discovered struct by struct but returned as one array;
    collect them in an arena-backed chain, then flatten */
 typedef struct seni_q_node {
