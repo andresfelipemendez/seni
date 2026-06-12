@@ -1,6 +1,7 @@
-/* c89 + -pedantic hides realpath and PATH_MAX behind feature macros;
-   200809L is the POSIX revision that adopted realpath */
-#define _POSIX_C_SOURCE 200809L
+/* c89 + -pedantic hides realpath and PATH_MAX behind feature macros.
+   _POSIX_C_SOURCE alone is NOT enough for realpath under glibc + -std=c89;
+   it needs the XSI extension. _XOPEN_SOURCE 700 implies POSIX.1-2008. */
+#define _XOPEN_SOURCE 700
 
 #include "platform.h"
 #include <dlfcn.h>
