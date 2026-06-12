@@ -333,6 +333,7 @@ parse_result parse_header(arena* a, char* header) {
             int k;
             size_t arr_size = 0;
             char* was = NULL;
+            char* def = NULL;
             while (header[i] != ';' && header[i] != ',' && header[i] != '\0') {
                 if (header[i] == '\n') line++;
                 i++;
@@ -344,50 +345,80 @@ parse_result parse_header(arena* a, char* header) {
             }
             len = i - start;
             while (len > 0 && is_white_space(header[start + len - 1])) len--;
-            /* optional trailing SENI_WAS(old_name) annotation: record it and
-               slice it off, so the rest of the declarator parses as before */
+            /* optional trailing annotations, in any order:
+                   SENI_WAS(old_name)     -- rename source
+                   SENI_DEFAULT(literal)  -- value for migration-invented data
+               record them and slice them off, so the rest of the declarator
+               parses as before */
             for (k = 0; k + 8 <= len; k++) {
-                if (strncmp(&header[start + k], "SENI_WAS", 8) == 0 &&
+                if (strncmp(&header[start + k], "SENI_", 5) == 0 &&
                     (k == 0 || !is_ident(header[start + k - 1])) &&
-                    !is_ident(header[start + k + 8])) break;
+                    (strncmp(&header[start + k], "SENI_WAS", 8) == 0 ||
+                     strncmp(&header[start + k], "SENI_DEFAULT", 12) == 0)) break;
             }
             if (k + 8 <= len) {
-                int p = start + k + 8;
+                int p = start + k;
                 int end = start + len;
-                int nstart;
-                int nlen;
-                while (p < end && is_white_space(header[p])) p++;
-                if (p >= end || header[p] != '(') {
-                    char* msg = arena_sprintf(a, "malformed SENI_WAS at line %d, expected SENI_WAS(old_field_name)", line);
-                    r.err = msg ? msg : "malformed SENI_WAS";
-                    return r;
+                while (p < end) {
+                    int is_was;
+                    int nstart;
+                    int nlen;
+                    if (strncmp(&header[p], "SENI_WAS", 8) == 0 &&
+                        !is_ident(header[p + 8])) {
+                        is_was = 1;
+                        p += 8;
+                    } else if (strncmp(&header[p], "SENI_DEFAULT", 12) == 0 &&
+                               !is_ident(header[p + 12])) {
+                        is_was = 0;
+                        p += 12;
+                    } else {
+                        int echo = end - p > MAX_TOKEN_ECHO ? MAX_TOKEN_ECHO : end - p;
+                        char* msg = arena_sprintf(a, "unexpected '%.*s' in annotations at line %d", echo, &header[p], line);
+                        r.err = msg ? msg : "unexpected text in annotations";
+                        return r;
+                    }
+                    while (p < end && is_white_space(header[p])) p++;
+                    if (p >= end || header[p] != '(') {
+                        char* msg = arena_sprintf(a, "malformed %s at line %d, expected an argument in parentheses",
+                                                  is_was ? "SENI_WAS" : "SENI_DEFAULT", line);
+                        r.err = msg ? msg : "malformed annotation";
+                        return r;
+                    }
+                    p++;
+                    while (p < end && is_white_space(header[p])) p++;
+                    nstart = p;
+                    if (is_was) {
+                        while (p < end && is_ident(header[p])) p++;
+                    } else {
+                        /* default literal: any run without parens; the
+                           migration compiler type-checks the text */
+                        while (p < end && header[p] != ')' && header[p] != '(') p++;
+                    }
+                    nlen = p - nstart;
+                    while (nlen > 0 && is_white_space(header[nstart + nlen - 1])) nlen--;
+                    while (p < end && is_white_space(header[p])) p++;
+                    if (nlen == 0 || p >= end || header[p] != ')') {
+                        char* msg = arena_sprintf(a, "malformed %s at line %d, empty or unterminated argument",
+                                                  is_was ? "SENI_WAS" : "SENI_DEFAULT", line);
+                        r.err = msg ? msg : "malformed annotation";
+                        return r;
+                    }
+                    p++;
+                    if (nlen > MAX_NAME) {
+                        char* msg = arena_sprintf(a, "%s argument too long (%d chars, max %d) at line %d",
+                                                  is_was ? "SENI_WAS" : "SENI_DEFAULT", nlen, MAX_NAME, line);
+                        r.err = msg ? msg : "annotation argument too long";
+                        return r;
+                    }
+                    if (is_was) {
+                        was = arena_copy_string(a, &header[nstart], nlen);
+                        if (!was) { r.err = "out of memory"; return r; }
+                    } else {
+                        def = arena_copy_string(a, &header[nstart], nlen);
+                        if (!def) { r.err = "out of memory"; return r; }
+                    }
+                    while (p < end && is_white_space(header[p])) p++;
                 }
-                p++;
-                while (p < end && is_white_space(header[p])) p++;
-                nstart = p;
-                while (p < end && is_ident(header[p])) p++;
-                nlen = p - nstart;
-                while (p < end && is_white_space(header[p])) p++;
-                if (nlen == 0 || p >= end || header[p] != ')') {
-                    char* msg = arena_sprintf(a, "malformed SENI_WAS at line %d, expected SENI_WAS(old_field_name)", line);
-                    r.err = msg ? msg : "malformed SENI_WAS";
-                    return r;
-                }
-                p++;
-                while (p < end && is_white_space(header[p])) p++;
-                if (p < end) {
-                    int echo = end - p > MAX_TOKEN_ECHO ? MAX_TOKEN_ECHO : end - p;
-                    char* msg = arena_sprintf(a, "unexpected '%.*s' after SENI_WAS at line %d", echo, &header[p], line);
-                    r.err = msg ? msg : "unexpected text after SENI_WAS";
-                    return r;
-                }
-                if (nlen > MAX_NAME) {
-                    char* msg = arena_sprintf(a, "SENI_WAS name too long (%d chars, max %d) at line %d", nlen, MAX_NAME, line);
-                    r.err = msg ? msg : "SENI_WAS name too long";
-                    return r;
-                }
-                was = arena_copy_string(a, &header[nstart], nlen);
-                if (!was) { r.err = "out of memory"; return r; }
                 len = k;
                 while (len > 0 && is_white_space(header[start + len - 1])) len--;
             }
@@ -447,6 +478,7 @@ parse_result parse_header(arena* a, char* header) {
             r.value.structs[si].fields[fi].type = cur_type;
             r.value.structs[si].fields[fi].array_size = arr_size;
             r.value.structs[si].fields[fi].was = was;
+            r.value.structs[si].fields[fi].def = def;
             fi++;
             if (header[i] == ',') {
                 state = PARSE_READ_FIELD_NAME;
@@ -583,22 +615,29 @@ generate_result generate_migration(arena* a, diff d) {
                     sb_appendf(&b, "        for (j = 0; j < %lu; j++) n[i].%s[j] = o[i].%s[j];\n",
                                (unsigned long)m, op->name, op->old_name);
                     if (op->new_array_size > m)
-                        sb_appendf(&b, "        for (j = %lu; j < %lu; j++) n[i].%s[j] = 0;\n",
-                                   (unsigned long)m, (unsigned long)op->new_array_size, op->name);
+                        sb_appendf(&b, "        for (j = %lu; j < %lu; j++) n[i].%s[j] = %s;\n",
+                                   (unsigned long)m, (unsigned long)op->new_array_size, op->name,
+                                   op->def ? op->def : "0");
                 } else if (op->old_array_size == 0) { /* scalar -> array */
                     sb_appendf(&b, "        n[i].%s[0] = o[i].%s;\n", op->name, op->old_name);
                     if (op->new_array_size > 1)
-                        sb_appendf(&b, "        for (j = 1; j < %lu; j++) n[i].%s[j] = 0;\n",
-                                   (unsigned long)op->new_array_size, op->name);
+                        sb_appendf(&b, "        for (j = 1; j < %lu; j++) n[i].%s[j] = %s;\n",
+                                   (unsigned long)op->new_array_size, op->name,
+                                   op->def ? op->def : "0");
                 } else { /* array -> scalar */
                     sb_appendf(&b, "        n[i].%s = o[i].%s[0];\n", op->name, op->old_name);
                 }
             } else {
+                /* invented values: SENI_DEFAULT's literal when given, else 0.
+                   the literal is emitted verbatim -- the migration compiler
+                   type-checks it against the field */
                 if (op->new_array_size == 0)
-                    sb_appendf(&b, "        n[i].%s = 0;\n", op->name);
+                    sb_appendf(&b, "        n[i].%s = %s;\n", op->name,
+                               op->def ? op->def : "0");
                 else
-                    sb_appendf(&b, "        for (j = 0; j < %lu; j++) n[i].%s[j] = 0;\n",
-                               (unsigned long)op->new_array_size, op->name);
+                    sb_appendf(&b, "        for (j = 0; j < %lu; j++) n[i].%s[j] = %s;\n",
+                               (unsigned long)op->new_array_size, op->name,
+                               op->def ? op->def : "0");
             }
         }
         sb_appendf(&b, "    }\n}\n\n");
@@ -849,6 +888,7 @@ diff_result diff_structs(arena* a, char *old_header, char *new_header){
             op->kind = field_op_zero;
             op->old_array_size = 0;
             op->new_array_size = ns->fields[f].array_size;
+            op->def = ns->fields[f].def;
             for (g = 0; os && g < os->fields_count; g++) {
                 if (strcmp(os->fields[g].name, ns->fields[f].name) == 0) {
                     if (os->fields[g].type != ns->fields[f].type) {

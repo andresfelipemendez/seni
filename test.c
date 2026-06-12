@@ -1029,6 +1029,62 @@ UTEST(generate, rename_copies_from_old_name) {
     ASSERT_TRUE(strstr(g.code, "n[i].pos[j] = o[i].old_pos[j];") != NULL);
 }
 
+UTEST(parse, seni_default) {
+    char buf[4096];
+    arena a;
+    parse_result r;
+    create_arena(&a, buf, sizeof(buf));
+    r = parse_header(&a,
+        "typedef struct { float spin SENI_DEFAULT(1.8f); int n; } s;");
+    ASSERT_FALSE(r.err);
+    ASSERT_STREQ("spin", r.value.structs[0].fields[0].name);
+    ASSERT_STREQ("1.8f", r.value.structs[0].fields[0].def);
+    ASSERT_TRUE(r.value.structs[0].fields[1].def == NULL);
+}
+
+UTEST(parse, seni_default_combined_with_was) {
+    char buf[4096];
+    arena a;
+    parse_result r;
+    create_arena(&a, buf, sizeof(buf));
+    r = parse_header(&a,
+        "typedef struct { int flags SENI_WAS(old_flags) SENI_DEFAULT(-1); } s;");
+    ASSERT_FALSE(r.err);
+    ASSERT_STREQ("flags", r.value.structs[0].fields[0].name);
+    ASSERT_STREQ("old_flags", r.value.structs[0].fields[0].was);
+    ASSERT_STREQ("-1", r.value.structs[0].fields[0].def);
+}
+
+UTEST(parse, seni_default_empty_is_error) {
+    char buf[4096];
+    arena a;
+    parse_result r;
+    create_arena(&a, buf, sizeof(buf));
+    r = parse_header(&a, "typedef struct { float x SENI_DEFAULT(); } s;");
+    ASSERT_TRUE(r.err != NULL);
+    ASSERT_TRUE(strstr(r.err, "SENI_DEFAULT") != NULL);
+}
+
+UTEST(generate, default_fills_new_field_and_array_tail) {
+    char buf[16384];
+    arena a;
+    diff_result d;
+    generate_result g;
+    create_arena(&a, buf, sizeof(buf));
+    d = diff_structs(&a,
+        "typedef struct { float x; float w[2]; } s;",
+        "typedef struct { float x; float w[4]; float spin SENI_DEFAULT(1.8f); int hp[3] SENI_DEFAULT(100); } s;");
+    ASSERT_FALSE(d.err);
+    g = generate_migration(&a, d.value);
+    ASSERT_FALSE(g.err);
+    /* new scalar gets the literal */
+    ASSERT_TRUE(strstr(g.code, "n[i].spin = 1.8f;") != NULL);
+    /* new array fills every element with the literal */
+    ASSERT_TRUE(strstr(g.code, "n[i].hp[j] = 100;") != NULL);
+    /* grown tail of an UNannotated array still zeroes */
+    ASSERT_TRUE(strstr(g.code, "n[i].w[j] = 0;") != NULL);
+}
+
 UTEST(generate, out_of_memory) {
     /* diff in a roomy arena, generate into a tiny one: OOM is guaranteed
        regardless of how internal struct sizes evolve */

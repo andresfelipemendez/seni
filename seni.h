@@ -16,6 +16,7 @@ typedef struct {
     ast_type type;
     size_t array_size;  /* 0 = scalar */
     char* was;          /* SENI_WAS(old_name) annotation, NULL = none */
+    char* def;          /* SENI_DEFAULT(literal) annotation, NULL = none */
 } ast_field;
 
 typedef struct {
@@ -41,6 +42,8 @@ typedef struct {
     ast_type type;           /* type in new struct */
     size_t old_array_size;   /* 0 = scalar; meaningful when kind == copy */
     size_t new_array_size;   /* 0 = scalar */
+    char* def;               /* SENI_DEFAULT literal for invented values
+                                (zero ops, grown array tails); NULL = 0 */
 } field_op;
 
 typedef struct {
